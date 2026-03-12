@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import math
 import os
 import random
@@ -49,6 +50,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.collections as mc
 import matplotlib.colors as mcolors
+from matplotlib import font_manager
 from matplotlib.patches import Circle
 import numpy as np
 
@@ -64,7 +66,6 @@ COLOR_DYNAMIC_EDGE  = "red"        # 红色边框
 COLOR_DYN_TRAJ      = "red"        # 动态障碍物轨迹颜色
 COLOR_DYN_ARROW_FC  = "darkred"    # 动态障碍物方向箭头颜色
 COLOR_ROBOT         = "#1f77b4"    # 蓝色机器人
-COLOR_GOAL_FACE     = "#2ca02c"    # 绿色目标
 COLOR_BOUNDARY      = "black"      # 边界框
 
 # 机器人航迹颜色（两种算法区分）
@@ -72,6 +73,25 @@ COLOR_TRAJ_DDPG     = "#ff7f0e"    # 橙色  DDPG
 COLOR_TRAJ_ATT      = "#9467bd"    # 紫色  LSTM-DDPG-ATT
 
 DYNAMIC_TRAJ_KEEP   = 60           # 动态障碍物轨迹保留步数
+
+
+def configure_matplotlib_chinese_font() -> None:
+    """配置中文字体，避免标题/图例中文显示为方块。"""
+    candidates = [
+        "Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans CJK TC",
+        "Source Han Sans SC", "WenQuanYi Zen Hei",
+        "Microsoft YaHei", "SimHei", "PingFang SC", "Arial Unicode MS",
+    ]
+    installed = {f.name for f in font_manager.fontManager.ttflist}
+    for name in candidates:
+        if name in installed:
+            matplotlib.rcParams["font.sans-serif"] = [name] + list(
+                matplotlib.rcParams.get("font.sans-serif", [])
+            )
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            print(f"[字体] 使用中文字体: {name}")
+            return
+    print("[字体] 未找到常见中文字体，中文可能显示异常。")
 
 
 # ─── 随机种子 ────────────────────────────────────────────────────────────────
@@ -82,6 +102,13 @@ def set_seed(seed: int) -> None:
     try:
         import torch
         torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        if hasattr(torch, "use_deterministic_algorithms"):
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
     except Exception:
         pass
 
@@ -200,7 +227,7 @@ def draw_env(
     ax.set_xlim(0, W)
     ax.set_ylim(0, H)
     ax.set_aspect("equal", adjustable="box")
-    ax.set_facecolor("#f9f9f9")
+    ax.set_facecolor("white")
     ax.set_xticks([])
     ax.set_yticks([])
 
@@ -213,17 +240,12 @@ def draw_env(
     ax.plot([0, W, W, 0, 0], [0, 0, H, H, 0],
             color=COLOR_BOUNDARY, linewidth=1.5, zorder=0)
 
-    # ── 目标（绿色空心圆 + 星标） ────────────────────────────────────────────
+    # ── 目标（黑色空心圆，不填充） ─────────────────────────────────────────────
     gx, gy = _get_goal_xy(env)
     goal_r = float(EnvConfig.GOAL_RADIUS)
     ax.add_patch(Circle((gx, gy), goal_r,
-                         fill=True, facecolor=COLOR_GOAL_FACE, edgecolor=COLOR_GOAL_FACE,
-                         alpha=0.20, linewidth=2, zorder=3))
-    ax.add_patch(Circle((gx, gy), goal_r,
-                         fill=False, edgecolor=COLOR_GOAL_FACE,
-                         linewidth=2, zorder=4))
-    ax.plot(gx, gy, marker="*", color=COLOR_GOAL_FACE,
-            markersize=12, zorder=5, linestyle="None")
+                        fill=False, edgecolor="black",
+                        linewidth=1.4, zorder=4))
 
     # ── 动态障碍物历史轨迹（alpha 渐变红色折线段） ──────────────────────────
     if dyn_trajs:
@@ -273,10 +295,13 @@ def draw_env(
         xs, ys = zip(*robot_traj)
         ax.plot(xs, ys, "-", color=traj_color, linewidth=2.0,
                 alpha=0.92, zorder=7)
-        ax.plot(xs[0],  ys[0],  "o", color=traj_color, markersize=7,
-                markeredgecolor="white", markeredgewidth=0.8, zorder=8)
-        ax.plot(xs[-1], ys[-1], "s", color=traj_color, markersize=8,
-                markeredgecolor="k",     markeredgewidth=0.5, zorder=8)
+        # 起点：蓝色实心圆点；终点：黑色空心圆
+        ax.plot(xs[0], ys[0], marker="o", linestyle="None",
+                color=COLOR_ROBOT, markersize=8,
+                markeredgecolor="white", markeredgewidth=0.9, zorder=8)
+        ax.plot(xs[-1], ys[-1], marker="o", linestyle="None",
+                markerfacecolor="none", markeredgecolor="black",
+                markeredgewidth=1.2, markersize=10, zorder=8)
 
     # ── 机器人当前位置 ───────────────────────────────────────────────────────
     rx, ry = float(env.robot.x), float(env.robot.y)
@@ -400,7 +425,7 @@ def eval_ddpg(
                 dt_mean_ms=float(np.mean(dt_all)) if dt_all else 0.0,
                 robot_traj=list(r_traj),
                 dyn_trajs=dyn_save,
-                env_snapshot=env,
+                env_snapshot=copy.deepcopy(env),
             ))
 
     n = n_episodes
@@ -512,7 +537,7 @@ def eval_lstm_att(
                 dt_mean_ms=float(np.mean(dt_all)) if dt_all else 0.0,
                 robot_traj=list(r_traj),
                 dyn_trajs=dyn_save,
-                env_snapshot=env,
+                env_snapshot=copy.deepcopy(env),
             ))
 
     n = n_episodes
@@ -596,8 +621,15 @@ def plot_trajectory_comparison(
                        label="静态障碍物"),
         mpatches.Patch(facecolor=COLOR_DYNAMIC_FACE, edgecolor=COLOR_DYNAMIC_EDGE,
                        alpha=0.4, label="动态障碍物"),
-        mpatches.Patch(facecolor=COLOR_GOAL_FACE,    alpha=0.3,  label="目标区域"),
-        mpatches.Patch(facecolor=COLOR_ROBOT,        label="机器人"),
+        plt.Line2D([0], [0], marker="o", linestyle="None", markersize=8,
+                   markerfacecolor="none", markeredgecolor="black",
+                   markeredgewidth=1.2, label="目标（黑色空心圆）"),
+        plt.Line2D([0], [0], marker="o", linestyle="None", markersize=7,
+                   markerfacecolor=COLOR_ROBOT, markeredgecolor="white",
+                   markeredgewidth=0.8, label="起点（蓝色圆点）"),
+        plt.Line2D([0], [0], marker="o", linestyle="None", markersize=8,
+                   markerfacecolor="none", markeredgecolor="black",
+                   markeredgewidth=1.2, label="终点（黑色空心圆）"),
         plt.Line2D([0], [0], color=COLOR_TRAJ_DDPG, linewidth=2, label="DDPG 航迹"),
         plt.Line2D([0], [0], color=COLOR_TRAJ_ATT,  linewidth=2, label="LSTM-DDPG-ATT 航迹"),
         plt.Line2D([0], [0], color=COLOR_DYN_TRAJ,  linewidth=1.5,
@@ -702,12 +734,19 @@ def plot_scene_only(env: NavigationEnv, args) -> plt.Figure:
     ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
 
     legend_handles = [
-        mpatches.Patch(facecolor=COLOR_ROBOT,        label="机器人（随机起点）"),
+        plt.Line2D([0], [0], marker="o", linestyle="None", markersize=7,
+                   markerfacecolor=COLOR_ROBOT, markeredgecolor="white",
+                   markeredgewidth=0.8, label="起点（蓝色圆点）"),
+        plt.Line2D([0], [0], marker="o", linestyle="None", markersize=8,
+                   markerfacecolor="none", markeredgecolor="black",
+                   markeredgewidth=1.2, label="终点（黑色空心圆）"),
         mpatches.Patch(facecolor=COLOR_STATIC_FACE,  edgecolor=COLOR_STATIC_EDGE,
                        label=f"静态障碍物 ({args.n_static}个)"),
         mpatches.Patch(facecolor=COLOR_DYNAMIC_FACE, edgecolor=COLOR_DYNAMIC_EDGE,
                        alpha=0.4, label=f"动态障碍物 ({args.n_dynamic}个)"),
-        mpatches.Patch(facecolor=COLOR_GOAL_FACE, alpha=0.4, label="目标（随机位置）"),
+        plt.Line2D([0], [0], marker="o", linestyle="None", markersize=8,
+                   markerfacecolor="none", markeredgecolor="black",
+                   markeredgewidth=1.2, label="目标（黑色空心圆）"),
     ]
     ax.legend(handles=legend_handles, loc="upper right", fontsize=8, framealpha=0.85)
     plt.tight_layout()
@@ -783,6 +822,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    configure_matplotlib_chinese_font()
     set_seed(args.seed)
 
     # 拼接完整模型路径
@@ -794,10 +834,14 @@ def main():
     print(f"[模型] DDPG → {ddpg_path}")
     print(f"[模型] ATT  → {att_path}")
 
+    # 注意：环境在每次 reset() 时都会读取 EnvConfig 的障碍物数量。
+    # 因此这里需要在整个评估流程内全局设置数量，不能只在建环境时临时设置。
+    EnvConfig.NUM_STATIC_OBSTACLES = int(args.n_static)
+    EnvConfig.NUM_DYNAMIC_OBSTACLES = int(args.n_dynamic)
+
     # ── 仅展示场景 ──────────────────────────────────────────────────────────
     if args.show_only:
-        with TempObstacleCounts(args.n_static, args.n_dynamic):
-            env = _build_env(args, enhanced=True)
+        env = _build_env(args, enhanced=True)
         env.reset()
         fig = plot_scene_only(env, args)
         out = args.save_fig.replace(".png", "_scene.png") if args.save_fig else "results/scene.png"
@@ -823,9 +867,8 @@ def main():
             print(f"[DDPG] 检测 state_dim 失败（{e}），默认使用 enhanced state")
 
     # ── 构建环境 ────────────────────────────────────────────────────────────
-    with TempObstacleCounts(args.n_static, args.n_dynamic):
-        env_ddpg = _build_env(args, enhanced=ddpg_enhanced)
-        env_att  = _build_env(args, enhanced=True)
+    env_ddpg = _build_env(args, enhanced=ddpg_enhanced)
+    env_att  = _build_env(args, enhanced=True)
 
     print(f"[环境] DDPG state_dim={env_ddpg.state_dim}  "
           f"ATT state_dim={env_att.state_dim}")
