@@ -90,6 +90,19 @@ class PlannerStats:
     replan_count: int = 0
 
 
+@dataclass
+class EpisodeTrace:
+    """单回合关键调试信息。"""
+
+    min_lidar_front: float = float("inf")
+    max_deviation: float = 0.0
+    local_trigger_steps: list[int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.local_trigger_steps is None:
+            self.local_trigger_steps = []
+
+
 class HybridTrajectoryPlanner:
     """MIDBO 全局 + LSTM-DDPG-Attention 局部避障混合规划器。"""
 
@@ -117,6 +130,7 @@ class HybridTrajectoryPlanner:
 
         self._state_queue: Optional[Deque[np.ndarray]] = None
         self.stats = PlannerStats()
+        self.trace = EpisodeTrace()
 
     # ------------------------ 全局层 ------------------------
 
@@ -357,6 +371,7 @@ class HybridTrajectoryPlanner:
     # ------------------------ 主流程 ------------------------
 
     def run_episode(self, reset: bool = True) -> dict:
+        self.trace = EpisodeTrace()
         state = self.env.reset() if reset else self.env._get_state()
         if len(self.global_path) == 0:
             self.plan_global_path()
@@ -370,7 +385,10 @@ class HybridTrajectoryPlanner:
             obstacles = self.get_planner_obstacles()
             local_goal, goal_idx = self.select_local_goal(self.cfg.lookahead_distance, obstacles)
 
+            prev_mode = self.mode
             self._maybe_switch_mode(local_goal, obstacles)
+            if prev_mode == "GLOBAL" and self.mode == "LOCAL":
+                self.trace.local_trigger_steps.append(t)
 
             if self.mode == "LOCAL":
                 action = self._local_policy_action(state, local_goal)
@@ -384,6 +402,14 @@ class HybridTrajectoryPlanner:
             total_reward += reward
             trajectory.append((self.env.robot.x, self.env.robot.y))
 
+            lidar = state[:EnvConfig.LIDAR_RAYS] * EnvConfig.LIDAR_MAX_RANGE
+            heading = self.env._get_heading_to_goal()
+            min_front = self._forward_sector_min_range(lidar, heading)
+            self.trace.min_lidar_front = min(self.trace.min_lidar_front, float(min_front))
+
+            deviation = self._distance_to_path()
+            self.trace.max_deviation = max(self.trace.max_deviation, deviation)
+
             self.stats.total_steps += 1
             if self._should_replan(goal_idx, t):
                 self.plan_global_path()
@@ -394,6 +420,9 @@ class HybridTrajectoryPlanner:
                 reasons = str(info.get("reason", ""))
                 break
 
+        if not done and not reasons:
+            reasons = "timeout_max_steps"
+
         return {
             "success": bool(self.env.episode_success),
             "failure": bool(self.env.episode_failure),
@@ -403,7 +432,18 @@ class HybridTrajectoryPlanner:
             "steps": len(trajectory) - 1,
             "trajectory": np.asarray(trajectory, dtype=np.float32),
             "stats": self.stats,
+            "trace": {
+                "min_lidar_front": float(self.trace.min_lidar_front),
+                "max_deviation": float(self.trace.max_deviation),
+                "local_trigger_steps": list(self.trace.local_trigger_steps),
+            },
         }
 
 
-__all__ = ["HybridConfig", "HybridTrajectoryPlanner", "PlannerStats", "LocalPolicy"]
+__all__ = [
+    "HybridConfig",
+    "HybridTrajectoryPlanner",
+    "PlannerStats",
+    "EpisodeTrace",
+    "LocalPolicy",
+]

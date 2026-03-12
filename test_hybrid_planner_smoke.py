@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""HybridTrajectoryPlanner 冒烟测试。"""
+"""HybridTrajectoryPlanner 冒烟测试（单回合）。"""
 
 from hybrid_path_planner import HybridConfig, HybridTrajectoryPlanner
 from environment import NavigationEnv
@@ -19,8 +19,14 @@ def main() -> None:
 
     assert result["steps"] > 0
     assert len(result["trajectory"]) == result["steps"] + 1
+    assert result["reason"] != ""
     print("Hybrid smoke test passed.")
-    print("success=", result["success"], "reason=", result["reason"], "steps=", result["steps"])
+    print(
+        "success=", result["success"],
+        "reason=", result["reason"],
+        "steps=", result["steps"],
+        "trace=", result["trace"],
+    )
 
 
 if __name__ == "__main__":
