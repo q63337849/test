@@ -49,6 +49,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.collections as mc
 import matplotlib.colors as mcolors
+from matplotlib import font_manager
 from matplotlib.patches import Circle
 import numpy as np
 
@@ -72,6 +73,25 @@ COLOR_TRAJ_DDPG     = "#ff7f0e"    # 橙色  DDPG
 COLOR_TRAJ_ATT      = "#9467bd"    # 紫色  LSTM-DDPG-ATT
 
 DYNAMIC_TRAJ_KEEP   = 60           # 动态障碍物轨迹保留步数
+
+
+def configure_matplotlib_chinese_font() -> None:
+    """配置中文字体，避免标题/图例中文显示为方块。"""
+    candidates = [
+        "Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans CJK TC",
+        "Source Han Sans SC", "WenQuanYi Zen Hei",
+        "Microsoft YaHei", "SimHei", "PingFang SC", "Arial Unicode MS",
+    ]
+    installed = {f.name for f in font_manager.fontManager.ttflist}
+    for name in candidates:
+        if name in installed:
+            matplotlib.rcParams["font.sans-serif"] = [name] + list(
+                matplotlib.rcParams.get("font.sans-serif", [])
+            )
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            print(f"[字体] 使用中文字体: {name}")
+            return
+    print("[字体] 未找到常见中文字体，中文可能显示异常。")
 
 
 # ─── 随机种子 ────────────────────────────────────────────────────────────────
@@ -273,10 +293,13 @@ def draw_env(
         xs, ys = zip(*robot_traj)
         ax.plot(xs, ys, "-", color=traj_color, linewidth=2.0,
                 alpha=0.92, zorder=7)
-        ax.plot(xs[0],  ys[0],  "o", color=traj_color, markersize=7,
-                markeredgecolor="white", markeredgewidth=0.8, zorder=8)
-        ax.plot(xs[-1], ys[-1], "s", color=traj_color, markersize=8,
-                markeredgecolor="k",     markeredgewidth=0.5, zorder=8)
+        # 起点：蓝色实心圆点；终点：黑色空心圆
+        ax.plot(xs[0], ys[0], marker="o", linestyle="None",
+                color=COLOR_ROBOT, markersize=8,
+                markeredgecolor="white", markeredgewidth=0.9, zorder=8)
+        ax.plot(xs[-1], ys[-1], marker="o", linestyle="None",
+                markerfacecolor="none", markeredgecolor="black",
+                markeredgewidth=1.2, markersize=10, zorder=8)
 
     # ── 机器人当前位置 ───────────────────────────────────────────────────────
     rx, ry = float(env.robot.x), float(env.robot.y)
@@ -597,7 +620,12 @@ def plot_trajectory_comparison(
         mpatches.Patch(facecolor=COLOR_DYNAMIC_FACE, edgecolor=COLOR_DYNAMIC_EDGE,
                        alpha=0.4, label="动态障碍物"),
         mpatches.Patch(facecolor=COLOR_GOAL_FACE,    alpha=0.3,  label="目标区域"),
-        mpatches.Patch(facecolor=COLOR_ROBOT,        label="机器人"),
+        plt.Line2D([0], [0], marker="o", linestyle="None", markersize=7,
+                   markerfacecolor=COLOR_ROBOT, markeredgecolor="white",
+                   markeredgewidth=0.8, label="起点（蓝色圆点）"),
+        plt.Line2D([0], [0], marker="o", linestyle="None", markersize=8,
+                   markerfacecolor="none", markeredgecolor="black",
+                   markeredgewidth=1.2, label="终点（黑色空心圆）"),
         plt.Line2D([0], [0], color=COLOR_TRAJ_DDPG, linewidth=2, label="DDPG 航迹"),
         plt.Line2D([0], [0], color=COLOR_TRAJ_ATT,  linewidth=2, label="LSTM-DDPG-ATT 航迹"),
         plt.Line2D([0], [0], color=COLOR_DYN_TRAJ,  linewidth=1.5,
@@ -702,7 +730,12 @@ def plot_scene_only(env: NavigationEnv, args) -> plt.Figure:
     ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
 
     legend_handles = [
-        mpatches.Patch(facecolor=COLOR_ROBOT,        label="机器人（随机起点）"),
+        plt.Line2D([0], [0], marker="o", linestyle="None", markersize=7,
+                   markerfacecolor=COLOR_ROBOT, markeredgecolor="white",
+                   markeredgewidth=0.8, label="起点（蓝色圆点）"),
+        plt.Line2D([0], [0], marker="o", linestyle="None", markersize=8,
+                   markerfacecolor="none", markeredgecolor="black",
+                   markeredgewidth=1.2, label="终点（黑色空心圆）"),
         mpatches.Patch(facecolor=COLOR_STATIC_FACE,  edgecolor=COLOR_STATIC_EDGE,
                        label=f"静态障碍物 ({args.n_static}个)"),
         mpatches.Patch(facecolor=COLOR_DYNAMIC_FACE, edgecolor=COLOR_DYNAMIC_EDGE,
@@ -783,6 +816,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    configure_matplotlib_chinese_font()
     set_seed(args.seed)
 
     # 拼接完整模型路径
