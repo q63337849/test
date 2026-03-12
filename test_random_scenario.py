@@ -826,10 +826,14 @@ def main():
     print(f"[模型] DDPG → {ddpg_path}")
     print(f"[模型] ATT  → {att_path}")
 
+    # 注意：环境在每次 reset() 时都会读取 EnvConfig 的障碍物数量。
+    # 因此这里需要在整个评估流程内全局设置数量，不能只在建环境时临时设置。
+    EnvConfig.NUM_STATIC_OBSTACLES = int(args.n_static)
+    EnvConfig.NUM_DYNAMIC_OBSTACLES = int(args.n_dynamic)
+
     # ── 仅展示场景 ──────────────────────────────────────────────────────────
     if args.show_only:
-        with TempObstacleCounts(args.n_static, args.n_dynamic):
-            env = _build_env(args, enhanced=True)
+        env = _build_env(args, enhanced=True)
         env.reset()
         fig = plot_scene_only(env, args)
         out = args.save_fig.replace(".png", "_scene.png") if args.save_fig else "results/scene.png"
@@ -855,9 +859,8 @@ def main():
             print(f"[DDPG] 检测 state_dim 失败（{e}），默认使用 enhanced state")
 
     # ── 构建环境 ────────────────────────────────────────────────────────────
-    with TempObstacleCounts(args.n_static, args.n_dynamic):
-        env_ddpg = _build_env(args, enhanced=ddpg_enhanced)
-        env_att  = _build_env(args, enhanced=True)
+    env_ddpg = _build_env(args, enhanced=ddpg_enhanced)
+    env_att  = _build_env(args, enhanced=True)
 
     print(f"[环境] DDPG state_dim={env_ddpg.state_dim}  "
           f"ATT state_dim={env_att.state_dim}")
