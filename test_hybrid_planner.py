@@ -42,6 +42,34 @@ def _save_episode_plot(env: NavigationEnv, planner: HybridTrajectoryPlanner, res
         color = "tab:red" if obs.is_dynamic else "tab:orange"
         ax.add_patch(Circle((obs.x, obs.y), obs.radius, color=color, alpha=0.25))
 
+    # 动态障碍物最近40步轨迹 + 当前运动方向
+    dyn_traces = result.get("dynamic_obstacle_traces", {}) or {}
+    for idx, obs in enumerate(env.obstacles):
+        if not obs.is_dynamic:
+            continue
+        trace = dyn_traces.get(idx, None)
+        if trace is not None and len(trace) >= 2:
+            ax.plot(trace[:, 0], trace[:, 1], color="tab:red", alpha=0.7, linewidth=1.0)
+
+        vx, vy = float(obs.vx), float(obs.vy)
+        vnorm = float(np.hypot(vx, vy))
+        if vnorm > 1e-6:
+            scale = 0.8  # 箭头显示长度（米）
+            dx = scale * vx / vnorm
+            dy = scale * vy / vnorm
+            ax.arrow(
+                obs.x,
+                obs.y,
+                dx,
+                dy,
+                head_width=0.22,
+                head_length=0.30,
+                fc="tab:red",
+                ec="tab:red",
+                alpha=0.9,
+                length_includes_head=True,
+            )
+
     # 全局参考路径
     if planner.global_path is not None and len(planner.global_path) > 0:
         gp = planner.global_path

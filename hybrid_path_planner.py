@@ -455,6 +455,13 @@ class HybridTrajectoryPlanner:
         trajectory = [(self.env.robot.x, self.env.robot.y)]
         reasons = ""
 
+        # 记录动态障碍物最近40步轨迹
+        dyn_hist: dict[int, deque[tuple[float, float]]] = {}
+        for idx, obs in enumerate(self.env.obstacles):
+            if obs.is_dynamic:
+                dyn_hist[idx] = deque(maxlen=40)
+                dyn_hist[idx].append((float(obs.x), float(obs.y)))
+
         for t in range(self.cfg.max_episode_steps):
             obstacles = self.get_planner_obstacles()
             local_goal, goal_idx = self.select_local_goal(self.cfg.lookahead_distance, obstacles)
@@ -477,6 +484,10 @@ class HybridTrajectoryPlanner:
             state = next_state
             total_reward += reward
             trajectory.append((self.env.robot.x, self.env.robot.y))
+
+            for idx, obs in enumerate(self.env.obstacles):
+                if obs.is_dynamic and idx in dyn_hist:
+                    dyn_hist[idx].append((float(obs.x), float(obs.y)))
 
             lidar = self._get_current_lidar_ranges(state)
             heading = self.env._get_heading_to_goal()
@@ -514,6 +525,9 @@ class HybridTrajectoryPlanner:
                 "min_lidar_front": float(self.trace.min_lidar_front),
                 "max_deviation": float(self.trace.max_deviation),
                 "local_trigger_steps": list(self.trace.local_trigger_steps),
+            },
+            "dynamic_obstacle_traces": {
+                idx: np.asarray(list(path), dtype=np.float32) for idx, path in dyn_hist.items()
             },
         }
 
