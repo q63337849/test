@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import math
 import os
 import random
@@ -417,7 +418,7 @@ def eval_ddpg(
                 dt_mean_ms=float(np.mean(dt_all)) if dt_all else 0.0,
                 robot_traj=list(r_traj),
                 dyn_trajs=dyn_save,
-                env_snapshot=env,
+                env_snapshot=copy.deepcopy(env),
             ))
 
     n = n_episodes
@@ -529,7 +530,7 @@ def eval_lstm_att(
                 dt_mean_ms=float(np.mean(dt_all)) if dt_all else 0.0,
                 robot_traj=list(r_traj),
                 dyn_trajs=dyn_save,
-                env_snapshot=env,
+                env_snapshot=copy.deepcopy(env),
             ))
 
     n = n_episodes
