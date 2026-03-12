@@ -298,18 +298,39 @@ def rollout_one(policy: Any, cfg: StateCfg, seed: int, max_steps: int, speed_min
 
 
 def _draw_dynamic_trend(ax, dyn_trajs: List[List[Tuple[float, float]]]) -> None:
+    """动态障碍物：轨迹 + 运动趋势 + 起终点样式。
+
+    - 起点：蓝色实心圆
+    - 终点：黑色空心圆
+    - 轨迹：红色线
+    - 动态障碍物点：红色圆点（当前位置）
+    """
     for traj in dyn_trajs:
         if len(traj) < 1:
             continue
         xs = [p[0] for p in traj]
         ys = [p[1] for p in traj]
 
-        # 动态障碍轨迹
+        # 轨迹（红色）
         if len(traj) >= 2:
             ax.plot(xs, ys, color="#d62728", linewidth=1.2, alpha=0.75)
 
-        # 动态障碍当前位置：红色圆点
-        ax.scatter([xs[-1]], [ys[-1]], s=20, c="#d62728", marker="o", zorder=5)
+        # 起点：蓝色实心圆
+        ax.scatter([xs[0]], [ys[0]], s=34, c="#1f77b4", marker="o", zorder=7)
+
+        # 动态障碍物当前位置：红色圆点
+        ax.scatter([xs[-1]], [ys[-1]], s=24, c="#d62728", marker="o", zorder=8)
+
+        # 终点：黑色空心圆
+        ax.scatter(
+            [xs[-1]], [ys[-1]],
+            s=44,
+            facecolors='none',
+            edgecolors='black',
+            marker='o',
+            linewidths=1.3,
+            zorder=9,
+        )
 
         # 运动趋势箭头（末两点）
         if len(traj) >= 2:
@@ -325,7 +346,7 @@ def _draw_dynamic_trend(ax, dyn_trajs: List[List[Tuple[float, float]]]) -> None:
                     fc="#d62728", ec="#d62728",
                     linewidth=1.0, alpha=0.9,
                     length_includes_head=True,
-                    zorder=6,
+                    zorder=10,
                 )
 
 
@@ -345,7 +366,7 @@ def _draw_robot_traj(ax, traj: List[Tuple[float, float]], label: str, linestyle:
     ax.scatter([xs[-1]], [ys[-1]], s=56, facecolors='none', edgecolors='black', marker='o', linewidths=1.4, zorder=8)
 
 
-def save_compare_png(ddpg: Rollout, att: Rollout, out_path: str) -> None:
+def save_compare_png(ddpg: Rollout, att: Rollout, out_path: str, seed: int) -> None:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(1, 1, figsize=(7.0, 6.3), dpi=130)
@@ -375,7 +396,7 @@ def save_compare_png(ddpg: Rollout, att: Rollout, out_path: str) -> None:
     _draw_robot_traj(ax, att.robot_traj, f"ATT steps={att.steps}, {att.reason}", linestyle='--')
 
     ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
-    ax.set_title('Dynamic Obstacle Trend & Trajectory + Robot Trajectory Compare')
+    ax.set_title(f'Dynamic Obstacle Trend & Trajectory (seed={seed}) + Robot Compare')
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
@@ -425,7 +446,7 @@ def main() -> None:
     ddpg_roll = rollout_one(ddpg_policy, att_cfg, args.seed, args.max_steps, args.dynamic_speed_min, args.dynamic_speed_max, patterns, args.dynamic_stop_prob)
     att_roll = rollout_one(att_policy, att_cfg, args.seed, args.max_steps, args.dynamic_speed_min, args.dynamic_speed_max, patterns, args.dynamic_stop_prob)
 
-    save_compare_png(ddpg_roll, att_roll, args.out)
+    save_compare_png(ddpg_roll, att_roll, args.out, seed=args.seed)
 
     print(f"Saved: {args.out}")
     print(f"DDPG: steps={ddpg_roll.steps}, reason={ddpg_roll.reason}, return={ddpg_roll.ret:.2f}")
