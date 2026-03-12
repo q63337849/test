@@ -33,6 +33,9 @@ from config import EnvConfig
 from environment import NavigationEnv
 
 
+DYNAMIC_TRAJ_KEEP_STEPS = 30
+
+
 def seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -164,6 +167,8 @@ def advance_dynamic_obstacles(env: NavigationEnv, trajs: dict[int, List[Tuple[fl
             obs.step(dt, w, h)
             if idx in trajs:
                 trajs[idx].append((float(obs.x), float(obs.y)))
+                if len(trajs[idx]) > DYNAMIC_TRAJ_KEEP_STEPS:
+                    trajs[idx] = trajs[idx][-DYNAMIC_TRAJ_KEEP_STEPS:]
 
 
 
