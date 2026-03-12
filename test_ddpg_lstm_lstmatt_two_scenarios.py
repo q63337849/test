@@ -88,6 +88,38 @@ def ensure_dir(p: str) -> None:
         os.makedirs(p, exist_ok=True)
 
 
+def resolve_model_path(path: str, model_dir: str = "") -> str:
+    """解析模型路径：优先原路径，其次在 model_dir 下查找同名文件。"""
+    p = str(path)
+    if os.path.exists(p):
+        return p
+    if model_dir:
+        alt = os.path.join(str(model_dir), os.path.basename(p))
+        if os.path.exists(alt):
+            return alt
+    return p
+
+
+def _iter_obstacles_with_vel(env: NavigationEnv):
+    """yield: (idx, x, y, r, is_dyn, vx, vy)"""
+    for idx, obs in enumerate(getattr(env, "obstacles", [])):
+        if isinstance(obs, dict):
+            x = float(obs.get("x", 0.0))
+            y = float(obs.get("y", 0.0))
+            r = float(obs.get("radius", 0.2))
+            is_dyn = bool(obs.get("is_dynamic", False))
+            vx = float(obs.get("vx", 0.0))
+            vy = float(obs.get("vy", 0.0))
+        else:
+            x = float(getattr(obs, "x"))
+            y = float(getattr(obs, "y"))
+            r = float(getattr(obs, "radius"))
+            is_dyn = bool(getattr(obs, "is_dynamic", False))
+            vx = float(getattr(obs, "vx", 0.0))
+            vy = float(getattr(obs, "vy", 0.0))
+        yield idx, x, y, r, is_dyn, vx, vy
+
+
 def parse_patterns(s: str) -> Tuple[str, ...]:
     items = [x.strip() for x in str(s).split(",") if x.strip()]
     return tuple(items)
@@ -859,6 +891,7 @@ def main() -> None:
     parser.add_argument("--ddpg_model", type=str, required=True)
     parser.add_argument("--lstm_model", type=str, required=True)
     parser.add_argument("--att_model", type=str, required=True)
+    parser.add_argument("--model_dir", type=str, default="", help="可选：模型所在目录；当 --*_model 为相对名且原路径不存在时，会在该目录下查找")
 
     parser.add_argument("--episodes", type=int, default=200)
     parser.add_argument("--seed", type=int, default=0)
@@ -907,13 +940,17 @@ def main() -> None:
     print("=" * 70)
 
     # ----------------- load ckpts -----------------
-    ddpg_ckpt = safe_torch_load(args.ddpg_model, map_location="cpu")
+    ddpg_model_path = resolve_model_path(args.ddpg_model, args.model_dir)
+    lstm_model_path = resolve_model_path(args.lstm_model, args.model_dir)
+    att_model_path = resolve_model_path(args.att_model, args.model_dir)
 
-    lstm_ckpt = safe_torch_load(args.lstm_model, map_location="cpu")
+    ddpg_ckpt = safe_torch_load(ddpg_model_path, map_location="cpu")
+
+    lstm_ckpt = safe_torch_load(lstm_model_path, map_location="cpu")
     if not isinstance(lstm_ckpt, dict) or ("actor_local" not in lstm_ckpt):
         raise RuntimeError("lstm_model 不是预期的 checkpoint(dict)，缺少 actor_local。")
 
-    att_ckpt = safe_torch_load(args.att_model, map_location="cpu")
+    att_ckpt = safe_torch_load(att_model_path, map_location="cpu")
     if not isinstance(att_ckpt, dict) or ("actor_local" not in att_ckpt):
         raise RuntimeError("att_model 不是预期的 checkpoint(dict)，缺少 actor_local。")
 
@@ -968,9 +1005,9 @@ def main() -> None:
 
     # ----------------- build policies -----------------
     # 注意：这些 agent 内部会创建 torch 模型；如果你想强制 GPU，可在各自模块里改 device
-    ddpg_policy = DDPGPolicy(args.ddpg_model, state_dim=ddpg_state_dim)
-    lstm_policy = LSTMPolicy(args.lstm_model, ckpt=lstm_ckpt, state_dim=env_tmp.state_dim)
-    att_policy = LSTMAttPolicy(args.att_model, ckpt=att_ckpt, state_dim=env_tmp2.state_dim)
+    ddpg_policy = DDPGPolicy(ddpg_model_path, state_dim=ddpg_state_dim)
+    lstm_policy = LSTMPolicy(lstm_model_path, ckpt=lstm_ckpt, state_dim=env_tmp.state_dim)
+    att_policy = LSTMAttPolicy(att_model_path, ckpt=att_ckpt, state_dim=env_tmp2.state_dim)
 
     policies: List[Tuple[PolicyBase, StateCfg]] = [
         (ddpg_policy, ddpg_cfg),
