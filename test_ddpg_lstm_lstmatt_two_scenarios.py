@@ -432,15 +432,20 @@ class DDPGPolicy(PolicyBase):
         self.device = device
 
         from ddpg import DDPGAgent
+        import inspect
 
-        # 用很小的 buffer/batch 也无所谓（只评测 act）
-        self.agent = DDPGAgent(
+        # 兼容不同 DDPGAgent 构造签名（有些版本没有 random_seed）
+        kwargs = dict(
             state_dim=self.state_dim,
             action_dim=2,
             random_seed=0,
             batch_size=64,
             buffer_size=1000,
         )
+        sig = inspect.signature(DDPGAgent.__init__)
+        kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+
+        self.agent = DDPGAgent(**kwargs)
         self.agent.load(model_path)
 
     def act(self, state_seq: np.ndarray) -> np.ndarray:
