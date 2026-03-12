@@ -495,6 +495,18 @@ class EvalResult:
     gif_path: str = ""
 
 
+@dataclass
+class TrajectoryRollout:
+    algo: str
+    scenario: str
+    reason: str
+    steps: int
+    total_reward: float
+    robot_traj: List[Tuple[float, float]]
+    init_obstacles: List[Tuple[float, float, float, bool]]
+    goal_xy: Tuple[float, float]
+
+
 def evaluate_policy(
     policy: PolicyBase,
     env: NavigationEnv,
@@ -607,6 +619,139 @@ def evaluate_policy(
     return res
 
 
+def rollout_single_episode(
+    policy: PolicyBase,
+    cfg: StateCfg,
+    scenario_name: str,
+    seed: int,
+    n_static: int,
+    n_dynamic: int,
+    dynamic_speed_min: float,
+    dynamic_speed_max: float,
+    dynamic_patterns: Tuple[str, ...],
+    dynamic_stop_prob: float,
+    max_steps: int,
+) -> TrajectoryRollout:
+    """在指定场景跑 1 个 episode，返回机器人轨迹用于可视化对比。"""
+    set_global_seed(int(seed))
+    env = build_env(
+        cfg,
+        n_static=n_static,
+        n_dynamic=n_dynamic,
+        dynamic_speed_min=dynamic_speed_min,
+        dynamic_speed_max=dynamic_speed_max,
+        dynamic_patterns=dynamic_patterns,
+        dynamic_stop_prob=dynamic_stop_prob,
+    )
+
+    state = env.reset()
+    policy.reset()
+
+    if policy.history_len > 1:
+        from collections import deque
+        q = deque([state.copy() for _ in range(policy.history_len)], maxlen=policy.history_len)
+
+    robot_traj: List[Tuple[float, float]] = [(float(env.robot.x), float(env.robot.y))]
+    init_obstacles: List[Tuple[float, float, float, bool]] = []
+    for _, x, y, r, is_dyn, _, _ in _iter_obstacles_with_vel(env):
+        init_obstacles.append((x, y, r, is_dyn))
+
+    total_reward = 0.0
+    done = False
+    info: Dict[str, Any] = {"reason": None}
+
+    step = 0
+    while (not done) and (step < int(max_steps)):
+        if policy.history_len > 1:
+            s_in = np.stack(list(q), axis=0)
+        else:
+            s_in = state
+
+        a = policy.act(s_in)
+        next_state, reward, done, info = env.step(a)
+        total_reward += float(reward)
+        state = next_state
+
+        if policy.history_len > 1:
+            q.append(state.copy())
+
+        robot_traj.append((float(env.robot.x), float(env.robot.y)))
+        step += 1
+
+    reason = str(info.get("reason", "max_steps"))
+    if (not done) and step >= int(max_steps):
+        reason = "max_steps"
+
+    result = TrajectoryRollout(
+        algo=policy.name,
+        scenario=scenario_name,
+        reason=reason,
+        steps=step,
+        total_reward=float(total_reward),
+        robot_traj=robot_traj,
+        init_obstacles=init_obstacles,
+        goal_xy=(float(env.goal_x), float(env.goal_y)),
+    )
+    env.close()
+    return result
+
+
+def save_train_traj_compare_png(
+    ddpg_rollout: TrajectoryRollout,
+    att_rollout: TrajectoryRollout,
+    out_path: str,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    w, h = float(EnvConfig.MAP_WIDTH), float(EnvConfig.MAP_HEIGHT)
+    fig, ax = plt.subplots(1, 1, figsize=(6.6, 6.0), dpi=130)
+
+    ax.set_xlim(0, w)
+    ax.set_ylim(0, h)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    ax.plot([0, w, w, 0, 0], [0, 0, h, h, 0], linewidth=1.0, color="black")
+
+    gx, gy = ddpg_rollout.goal_xy
+    goal = plt.Circle((gx, gy), radius=float(EnvConfig.GOAL_RADIUS), fill=False, linewidth=2, edgecolor="green")
+    ax.add_patch(goal)
+
+    for x, y, r, is_dyn in ddpg_rollout.init_obstacles:
+        if is_dyn:
+            circ = plt.Circle((x, y), radius=r, fill=True, alpha=0.30, facecolor="#ff7f7f", edgecolor="#d62728", linewidth=1)
+        else:
+            circ = plt.Circle((x, y), radius=r, fill=True, alpha=0.50, facecolor="0.7", edgecolor="0.55", linewidth=1)
+        ax.add_patch(circ)
+
+    def _plot_traj(traj: List[Tuple[float, float]], color: str, label: str):
+        if len(traj) >= 2:
+            xs = [p[0] for p in traj]
+            ys = [p[1] for p in traj]
+            ax.plot(xs, ys, color=color, linewidth=2.0, label=label)
+            ax.scatter([xs[0]], [ys[0]], marker="o", s=20, color=color, alpha=0.9)
+            ax.scatter([xs[-1]], [ys[-1]], marker="x", s=36, color=color, alpha=0.95)
+
+    _plot_traj(
+        ddpg_rollout.robot_traj,
+        "#1f77b4",
+        f"DDPG (steps={ddpg_rollout.steps}, reason={ddpg_rollout.reason})",
+    )
+    _plot_traj(
+        att_rollout.robot_traj,
+        "#ff7f0e",
+        f"LSTM-DDPG-Attention (steps={att_rollout.steps}, reason={att_rollout.reason})",
+    )
+
+    ax.set_title("Training Scene Trajectory Compare: DDPG vs LSTM-DDPG-Attention")
+    ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
 def print_table(results: List[EvalResult]) -> None:
     # 统一对齐输出
     headers = [
@@ -678,6 +823,13 @@ def main() -> None:
     parser.add_argument("--gif_episodes", type=int, default=1)
     parser.add_argument("--gif_fps", type=int, default=15)
     parser.add_argument("--gif_stride", type=int, default=1)
+
+    # 训练场景单回合轨迹对比（DDPG vs LSTM-DDPG-Attention）
+    parser.add_argument("--save_train_traj_compare", action="store_true")
+    parser.add_argument("--train_traj_out", type=str, default="ddpg_vs_lstmatt_train_traj.png")
+    parser.add_argument("--train_traj_seed", type=int, default=None, help="轨迹对比使用的随机种子，默认沿用 --seed")
+    parser.add_argument("--train_traj_max_steps", type=int, default=int(getattr(EnvConfig, "MAX_STEPS", 500)))
+    parser.add_argument("--only_train_traj_compare", action="store_true", help="仅生成训练场景轨迹对比图，不跑完整评测")
 
     args = parser.parse_args()
 
@@ -776,6 +928,48 @@ def main() -> None:
         (lstm_policy, lstm_cfg),
         (att_policy, att_cfg),
     ]
+
+    # ----------------- optional: training-scene trajectory compare (DDPG vs ATT) -----------------
+    if args.save_train_traj_compare or args.only_train_traj_compare:
+        traj_seed = int(args.seed if args.train_traj_seed is None else args.train_traj_seed)
+        print("\n" + "=" * 70)
+        print(f"Trajectory compare on training scene (seed={traj_seed})")
+        print("=" * 70)
+
+        ddpg_rollout = rollout_single_episode(
+            policy=ddpg_policy,
+            cfg=ddpg_cfg,
+            scenario_name="scene_train",
+            seed=traj_seed,
+            n_static=args.base_static,
+            n_dynamic=args.base_dynamic,
+            dynamic_speed_min=args.dynamic_speed_min,
+            dynamic_speed_max=args.dynamic_speed_max,
+            dynamic_patterns=dyn_patterns,
+            dynamic_stop_prob=args.dynamic_stop_prob,
+            max_steps=args.train_traj_max_steps,
+        )
+        att_rollout = rollout_single_episode(
+            policy=att_policy,
+            cfg=att_cfg,
+            scenario_name="scene_train",
+            seed=traj_seed,
+            n_static=args.base_static,
+            n_dynamic=args.base_dynamic,
+            dynamic_speed_min=args.dynamic_speed_min,
+            dynamic_speed_max=args.dynamic_speed_max,
+            dynamic_patterns=dyn_patterns,
+            dynamic_stop_prob=args.dynamic_stop_prob,
+            max_steps=args.train_traj_max_steps,
+        )
+
+        save_train_traj_compare_png(ddpg_rollout, att_rollout, args.train_traj_out)
+        print(f"Saved trajectory compare: {args.train_traj_out}")
+        print(f"  DDPG: steps={ddpg_rollout.steps}, reason={ddpg_rollout.reason}, return={ddpg_rollout.total_reward:.2f}")
+        print(f"  ATT : steps={att_rollout.steps}, reason={att_rollout.reason}, return={att_rollout.total_reward:.2f}")
+
+        if args.only_train_traj_compare:
+            return
 
     results: List[EvalResult] = []
 
