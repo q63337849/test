@@ -65,7 +65,6 @@ COLOR_DYNAMIC_EDGE  = "red"        # 红色边框
 COLOR_DYN_TRAJ      = "red"        # 动态障碍物轨迹颜色
 COLOR_DYN_ARROW_FC  = "darkred"    # 动态障碍物方向箭头颜色
 COLOR_ROBOT         = "#1f77b4"    # 蓝色机器人
-COLOR_GOAL_FACE     = "#2ca02c"    # 绿色目标
 COLOR_BOUNDARY      = "black"      # 边界框
 
 # 机器人航迹颜色（两种算法区分）
@@ -220,7 +219,7 @@ def draw_env(
     ax.set_xlim(0, W)
     ax.set_ylim(0, H)
     ax.set_aspect("equal", adjustable="box")
-    ax.set_facecolor("#f9f9f9")
+    ax.set_facecolor("white")
     ax.set_xticks([])
     ax.set_yticks([])
 
@@ -233,17 +232,12 @@ def draw_env(
     ax.plot([0, W, W, 0, 0], [0, 0, H, H, 0],
             color=COLOR_BOUNDARY, linewidth=1.5, zorder=0)
 
-    # ── 目标（绿色空心圆 + 星标） ────────────────────────────────────────────
+    # ── 目标（黑色空心圆，不填充） ─────────────────────────────────────────────
     gx, gy = _get_goal_xy(env)
     goal_r = float(EnvConfig.GOAL_RADIUS)
     ax.add_patch(Circle((gx, gy), goal_r,
-                         fill=True, facecolor=COLOR_GOAL_FACE, edgecolor=COLOR_GOAL_FACE,
-                         alpha=0.20, linewidth=2, zorder=3))
-    ax.add_patch(Circle((gx, gy), goal_r,
-                         fill=False, edgecolor=COLOR_GOAL_FACE,
-                         linewidth=2, zorder=4))
-    ax.plot(gx, gy, marker="*", color=COLOR_GOAL_FACE,
-            markersize=12, zorder=5, linestyle="None")
+                        fill=False, edgecolor="black",
+                        linewidth=1.4, zorder=4))
 
     # ── 动态障碍物历史轨迹（alpha 渐变红色折线段） ──────────────────────────
     if dyn_trajs:
@@ -619,7 +613,9 @@ def plot_trajectory_comparison(
                        label="静态障碍物"),
         mpatches.Patch(facecolor=COLOR_DYNAMIC_FACE, edgecolor=COLOR_DYNAMIC_EDGE,
                        alpha=0.4, label="动态障碍物"),
-        mpatches.Patch(facecolor=COLOR_GOAL_FACE,    alpha=0.3,  label="目标区域"),
+        plt.Line2D([0], [0], marker="o", linestyle="None", markersize=8,
+                   markerfacecolor="none", markeredgecolor="black",
+                   markeredgewidth=1.2, label="目标（黑色空心圆）"),
         plt.Line2D([0], [0], marker="o", linestyle="None", markersize=7,
                    markerfacecolor=COLOR_ROBOT, markeredgecolor="white",
                    markeredgewidth=0.8, label="起点（蓝色圆点）"),
@@ -740,7 +736,9 @@ def plot_scene_only(env: NavigationEnv, args) -> plt.Figure:
                        label=f"静态障碍物 ({args.n_static}个)"),
         mpatches.Patch(facecolor=COLOR_DYNAMIC_FACE, edgecolor=COLOR_DYNAMIC_EDGE,
                        alpha=0.4, label=f"动态障碍物 ({args.n_dynamic}个)"),
-        mpatches.Patch(facecolor=COLOR_GOAL_FACE, alpha=0.4, label="目标（随机位置）"),
+        plt.Line2D([0], [0], marker="o", linestyle="None", markersize=8,
+                   markerfacecolor="none", markeredgecolor="black",
+                   markeredgewidth=1.2, label="目标（黑色空心圆）"),
     ]
     ax.legend(handles=legend_handles, loc="upper right", fontsize=8, framealpha=0.85)
     plt.tight_layout()
