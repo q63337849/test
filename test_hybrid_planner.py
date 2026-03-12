@@ -84,6 +84,11 @@ def run(args: argparse.Namespace) -> None:
         midbo_population=args.midbo_population,
         midbo_iterations=args.midbo_iterations,
         waypoint_count=args.waypoint_count,
+        fast_mode=args.fast_mode,
+        fast_population_cap=args.fast_population_cap,
+        fast_iteration_cap=args.fast_iteration_cap,
+        max_replans_per_episode=args.max_replans_per_episode,
+        global_corridor_width=args.global_corridor_width,
         max_episode_steps=args.max_steps,
     )
 
@@ -108,6 +113,11 @@ def run(args: argparse.Namespace) -> None:
     print(f"goal_radius: {EnvConfig.GOAL_RADIUS:.2f}m")
     print(f"control_dt: {EnvConfig.DT:.2f}s, max_steps={EnvConfig.MAX_STEPS}")
     print(f"planner: MIDBO(pop={args.midbo_population}, iter={args.midbo_iterations}, wp={args.waypoint_count})")
+    print(
+        "planner_fast_mode: "
+        f"{args.fast_mode} (cap_pop={args.fast_population_cap}, cap_iter={args.fast_iteration_cap}, "
+        f"max_replans={args.max_replans_per_episode}, corridor={args.global_corridor_width:.1f}m)"
+    )
     print("=" * 72)
 
     for ep in range(args.episodes):
@@ -169,5 +179,10 @@ if __name__ == "__main__":
     parser.add_argument("--midbo_population", type=int, default=20)
     parser.add_argument("--midbo_iterations", type=int, default=80)
     parser.add_argument("--waypoint_count", type=int, default=8)
+    parser.add_argument("--fast_mode", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--fast_population_cap", type=int, default=12)
+    parser.add_argument("--fast_iteration_cap", type=int, default=40)
+    parser.add_argument("--max_replans_per_episode", type=int, default=2)
+    parser.add_argument("--global_corridor_width", type=float, default=10.0)
 
     run(parser.parse_args())

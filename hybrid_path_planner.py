@@ -47,6 +47,13 @@ class HybridConfig:
     midbo_population: int = 30
     midbo_iterations: int = 120
     waypoint_count: int = 10
+    fast_mode: bool = True
+    fast_population_cap: int = 12
+    fast_iteration_cap: int = 40
+    replan_population_scale: float = 0.6
+    replan_iteration_scale: float = 0.5
+    max_replans_per_episode: int = 2
+    global_corridor_width: float = 10.0
 
     # 航迹密化
     densify_spacing: float = 0.30
@@ -142,9 +149,30 @@ class HybridTrajectoryPlanner:
 
     def _build_global_env(self, start_xy: np.ndarray, goal_xy: np.ndarray) -> TrajectoryEnvironment:
         static_boxes = []
+
+        line_vec = goal_xy - start_xy
+        line_len2 = float(np.dot(line_vec, line_vec))
+
+        def _dist_to_segment(px: float, py: float) -> float:
+            point = np.array([px, py], dtype=np.float64)
+            if line_len2 < 1e-9:
+                return float(np.linalg.norm(point - start_xy))
+            t = float(np.dot(point - start_xy, line_vec) / line_len2)
+            t = float(np.clip(t, 0.0, 1.0))
+            proj = start_xy + t * line_vec
+            return float(np.linalg.norm(point - proj))
+
         for obs in self.env.obstacles:
             if not obs.is_dynamic:
-                static_boxes.append(self._circle_to_aabb(obs.x, obs.y, obs.radius))
+                d = _dist_to_segment(obs.x, obs.y)
+                if d <= self.cfg.global_corridor_width:
+                    static_boxes.append(self._circle_to_aabb(obs.x, obs.y, obs.radius))
+
+        if not static_boxes:
+            for obs in self.env.obstacles:
+                if not obs.is_dynamic:
+                    static_boxes.append(self._circle_to_aabb(obs.x, obs.y, obs.radius))
+
         obstacles = np.asarray(static_boxes, dtype=np.float64) if static_boxes else np.zeros((0, 6), dtype=np.float64)
 
         return TrajectoryEnvironment(
@@ -175,16 +203,31 @@ class HybridTrajectoryPlanner:
                 dense.append(p0 + seg * (k / n))
         return np.asarray(dense, dtype=np.float32)
 
-    def plan_global_path(self) -> np.ndarray:
+    def _resolve_midbo_budget(self, for_replan: bool) -> tuple[int, int]:
+        pop = int(self.cfg.midbo_population)
+        iters = int(self.cfg.midbo_iterations)
+
+        if self.cfg.fast_mode:
+            pop = min(pop, int(self.cfg.fast_population_cap))
+            iters = min(iters, int(self.cfg.fast_iteration_cap))
+
+        if for_replan:
+            pop = max(6, int(round(pop * self.cfg.replan_population_scale)))
+            iters = max(20, int(round(iters * self.cfg.replan_iteration_scale)))
+
+        return pop, iters
+
+    def plan_global_path(self, for_replan: bool = False) -> np.ndarray:
         t0 = time.perf_counter()
         start_xy = np.array([self.env.robot.x, self.env.robot.y], dtype=np.float64)
         goal_xy = np.array([self.env.goal_x, self.env.goal_y], dtype=np.float64)
+        population, iterations = self._resolve_midbo_budget(for_replan)
 
         g_env = self._build_global_env(start_xy, goal_xy)
         _, best_pos, _ = plan_path_with_midbo(
             g_env,
-            population=self.cfg.midbo_population,
-            iterations=self.cfg.midbo_iterations,
+            population=population,
+            iterations=iterations,
             random_state=int(self.rng.integers(1, 10**9)),
         )
         coarse = g_env.sample_path(best_pos)[:, :2]
@@ -387,9 +430,13 @@ class HybridTrajectoryPlanner:
     def run_episode(self, reset: bool = True) -> dict:
         self.trace = EpisodeTrace()
         self.stats = PlannerStats()
+        self._last_replan_step = -10**9
+        self._deviation_counter = 0
+        self._stuck_counter = 0
+        self.mode = "GLOBAL"
         state = self.env.reset() if reset else self.env._get_state()
         if len(self.global_path) == 0:
-            self.plan_global_path()
+            self.plan_global_path(for_replan=False)
 
         done = False
         total_reward = 0.0
@@ -428,9 +475,9 @@ class HybridTrajectoryPlanner:
             self.trace.max_deviation = max(self.trace.max_deviation, deviation)
 
             self.stats.total_steps += 1
-            if self._should_replan(goal_idx, t):
+            if self._should_replan(goal_idx, t) and self.stats.replan_count < self.cfg.max_replans_per_episode:
                 t_replan = time.perf_counter()
-                self.plan_global_path()
+                self.plan_global_path(for_replan=True)
                 self.stats.replan_count += 1
                 self.stats.replan_time_sec += time.perf_counter() - t_replan
                 self._last_replan_step = t

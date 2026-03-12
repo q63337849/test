@@ -354,8 +354,10 @@ def midbo(
         danger_k = 5
         danger_var_th = 1e-6
         danger_ratio = 0.2
+        finite_fit = personal_best_fit[np.isfinite(personal_best_fit)]
+        fit_var = np.var(finite_fit) if finite_fit.size > 0 else np.inf
         if current_iter > danger_k and (
-            global_best_fit == convergence[max(0, t - danger_k)] or np.var(personal_best_fit) < danger_var_th
+            global_best_fit == convergence[max(0, t - danger_k)] or fit_var < danger_var_th
         ):
             danger_count = max(1, int(round(danger_ratio * population)))
             worst_indices = np.argpartition(personal_best_fit, -danger_count)[-danger_count:]
