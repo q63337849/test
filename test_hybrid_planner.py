@@ -127,6 +127,9 @@ def run(args: argparse.Namespace) -> None:
     avg_reward = float(np.mean([r["reward"] for r in results]))
     avg_min_front = float(np.mean([r["trace"]["min_lidar_front"] for r in results]))
     avg_max_dev = float(np.mean([r["trace"]["max_deviation"] for r in results]))
+    avg_replans = float(np.mean([r["stats"].replan_count for r in results]))
+    avg_global_plan_time = float(np.mean([r["stats"].global_plan_time_sec for r in results]))
+    avg_replan_time = float(np.mean([r["stats"].replan_time_sec for r in results]))
 
     print("\n" + "=" * 72)
     print("Hybrid Planner Evaluation Summary")
@@ -138,6 +141,9 @@ def run(args: argparse.Namespace) -> None:
     print(f"avg_reward: {avg_reward:.2f}")
     print(f"avg_min_lidar_front: {avg_min_front:.3f} m")
     print(f"avg_max_deviation: {avg_max_dev:.3f} m")
+    print(f"avg_replans: {avg_replans:.2f}")
+    print(f"avg_global_plan_time_sec: {avg_global_plan_time:.3f}")
+    print(f"avg_replan_time_sec: {avg_replan_time:.3f}")
     print(f"terminal_reasons: {dict(reason_counter)}")
 
 

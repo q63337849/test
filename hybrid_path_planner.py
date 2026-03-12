@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Optional, Protocol
@@ -75,7 +76,7 @@ class HybridConfig:
     deviation_threshold: float = 0.8
     deviation_steps_trigger: int = 12
     max_local_stuck_steps: int = 25
-    replan_cooldown_steps: int = 20
+    replan_cooldown_steps: int = 80
 
     # 执行
     max_episode_steps: int = 2000
@@ -88,6 +89,8 @@ class PlannerStats:
     local_steps: int = 0
     trigger_count: int = 0
     replan_count: int = 0
+    global_plan_time_sec: float = 0.0
+    replan_time_sec: float = 0.0
 
 
 @dataclass
@@ -173,6 +176,7 @@ class HybridTrajectoryPlanner:
         return np.asarray(dense, dtype=np.float32)
 
     def plan_global_path(self) -> np.ndarray:
+        t0 = time.perf_counter()
         start_xy = np.array([self.env.robot.x, self.env.robot.y], dtype=np.float64)
         goal_xy = np.array([self.env.goal_x, self.env.goal_y], dtype=np.float64)
 
@@ -189,7 +193,13 @@ class HybridTrajectoryPlanner:
         dists = np.linalg.norm(self.global_path - start_xy[None, :], axis=1)
         self.current_goal_idx = int(np.argmin(dists))
         self.last_goal_idx = self.current_goal_idx
+        self.stats.global_plan_time_sec += time.perf_counter() - t0
         return self.global_path
+
+    @staticmethod
+    def _extract_lidar_from_state(state: np.ndarray) -> np.ndarray:
+        """从状态向量中提取 LiDAR 距离（米）。"""
+        return np.asarray(state[:EnvConfig.LIDAR_RAYS], dtype=np.float32) * float(EnvConfig.LIDAR_MAX_RANGE)
 
     # ------------------------ 感知/安全 ------------------------
 
@@ -262,18 +272,27 @@ class HybridTrajectoryPlanner:
 
     # ------------------------ 模式切换 ------------------------
 
-    def _should_trigger_local(self, local_goal: np.ndarray, obstacles: list[tuple[float, float, float]]) -> bool:
-        state = self.env._get_state()  # 使用环境内部状态构造
-        lidar = state[:EnvConfig.LIDAR_RAYS] * EnvConfig.LIDAR_MAX_RANGE
-        heading = self.env._get_heading_to_goal()
+    def _should_trigger_local(
+        self,
+        local_goal: np.ndarray,
+        obstacles: list[tuple[float, float, float]],
+        lidar: np.ndarray,
+        heading: float,
+    ) -> bool:
         min_front = self._forward_sector_min_range(lidar, heading)
 
         pos = np.array([self.env.robot.x, self.env.robot.y], dtype=np.float32)
         short_path_unsafe = not self._segment_is_safe(pos, local_goal, obstacles)
         return (min_front < self.cfg.lidar_trigger_distance) or short_path_unsafe
 
-    def _maybe_switch_mode(self, local_goal: np.ndarray, obstacles: list[tuple[float, float, float]]) -> None:
-        trigger = self._should_trigger_local(local_goal, obstacles)
+    def _maybe_switch_mode(
+        self,
+        local_goal: np.ndarray,
+        obstacles: list[tuple[float, float, float]],
+        lidar: np.ndarray,
+        heading: float,
+    ) -> None:
+        trigger = self._should_trigger_local(local_goal, obstacles, lidar, heading)
 
         if self.mode == "GLOBAL":
             if trigger:
@@ -283,9 +302,6 @@ class HybridTrajectoryPlanner:
             return
 
         # LOCAL -> GLOBAL (迟滞)
-        state = self.env._get_state()
-        lidar = state[:EnvConfig.LIDAR_RAYS] * EnvConfig.LIDAR_MAX_RANGE
-        heading = self.env._get_heading_to_goal()
         min_front = self._forward_sector_min_range(lidar, heading)
         path_safe = self._segment_is_safe(np.array([self.env.robot.x, self.env.robot.y], dtype=np.float32), local_goal, obstacles)
 
@@ -312,11 +328,9 @@ class HybridTrajectoryPlanner:
             linear *= 0.6
         return np.array([linear, angular], dtype=np.float32)
 
-    def _fallback_local_action(self, local_goal: np.ndarray) -> np.ndarray:
+    def _fallback_local_action(self, local_goal: np.ndarray, lidar: np.ndarray) -> np.ndarray:
         """未提供学习策略时的几何局部动作（简化兜底）。"""
         action = self._global_tracker_action(local_goal)
-        state = self.env._get_state()
-        lidar = state[:EnvConfig.LIDAR_RAYS] * EnvConfig.LIDAR_MAX_RANGE
         if float(np.min(lidar)) < 0.8:
             action[0] = min(action[0], 0.2)
             left = float(np.mean(lidar[: len(lidar) // 2]))
@@ -324,9 +338,9 @@ class HybridTrajectoryPlanner:
             action[1] = np.clip(action[1] + (right - left) * 0.8, -EnvConfig.MAX_ANGULAR_VEL, EnvConfig.MAX_ANGULAR_VEL)
         return action
 
-    def _local_policy_action(self, state: np.ndarray, local_goal: np.ndarray) -> np.ndarray:
+    def _local_policy_action(self, state: np.ndarray, local_goal: np.ndarray, lidar: np.ndarray) -> np.ndarray:
         if self.local_policy is None:
-            return self._fallback_local_action(local_goal)
+            return self._fallback_local_action(local_goal, lidar)
 
         if self._state_queue is None:
             h = max(1, int(getattr(self.local_policy, "history_len", 5)))
@@ -372,6 +386,7 @@ class HybridTrajectoryPlanner:
 
     def run_episode(self, reset: bool = True) -> dict:
         self.trace = EpisodeTrace()
+        self.stats = PlannerStats()
         state = self.env.reset() if reset else self.env._get_state()
         if len(self.global_path) == 0:
             self.plan_global_path()
@@ -384,14 +399,16 @@ class HybridTrajectoryPlanner:
         for t in range(self.cfg.max_episode_steps):
             obstacles = self.get_planner_obstacles()
             local_goal, goal_idx = self.select_local_goal(self.cfg.lookahead_distance, obstacles)
+            heading = self.env._get_heading_to_goal()
+            lidar = self._extract_lidar_from_state(state)
 
             prev_mode = self.mode
-            self._maybe_switch_mode(local_goal, obstacles)
+            self._maybe_switch_mode(local_goal, obstacles, lidar, heading)
             if prev_mode == "GLOBAL" and self.mode == "LOCAL":
                 self.trace.local_trigger_steps.append(t)
 
             if self.mode == "LOCAL":
-                action = self._local_policy_action(state, local_goal)
+                action = self._local_policy_action(state, local_goal, lidar)
                 self.stats.local_steps += 1
             else:
                 action = self._global_tracker_action(local_goal)
@@ -402,7 +419,7 @@ class HybridTrajectoryPlanner:
             total_reward += reward
             trajectory.append((self.env.robot.x, self.env.robot.y))
 
-            lidar = state[:EnvConfig.LIDAR_RAYS] * EnvConfig.LIDAR_MAX_RANGE
+            lidar = self._extract_lidar_from_state(state)
             heading = self.env._get_heading_to_goal()
             min_front = self._forward_sector_min_range(lidar, heading)
             self.trace.min_lidar_front = min(self.trace.min_lidar_front, float(min_front))
@@ -412,8 +429,10 @@ class HybridTrajectoryPlanner:
 
             self.stats.total_steps += 1
             if self._should_replan(goal_idx, t):
+                t_replan = time.perf_counter()
                 self.plan_global_path()
                 self.stats.replan_count += 1
+                self.stats.replan_time_sec += time.perf_counter() - t_replan
                 self._last_replan_step = t
 
             if done:
