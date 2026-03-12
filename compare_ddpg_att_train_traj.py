@@ -215,8 +215,9 @@ class Rollout:
     steps: int
     ret: float
     goal: Tuple[float, float]
-    static_obs: List[Tuple[float, float]]
+    static_obs: List[Tuple[float, float, float]]
     dyn_trajs: List[List[Tuple[float, float]]]
+    dyn_radii: List[float]
 
 
 def make_env(cfg: StateCfg, speed_min: float, speed_max: float, patterns: Tuple[str, ...], stop_prob: float) -> NavigationEnv:
@@ -239,23 +240,27 @@ def rollout_one(policy: Any, cfg: StateCfg, seed: int, max_steps: int, speed_min
 
     robot_traj = [(float(env.robot.x), float(env.robot.y))]
 
-    static_obs: List[Tuple[float, float]] = []
+    static_obs: List[Tuple[float, float, float]] = []
     dyn_idx: List[int] = []
     for i, obs in enumerate(getattr(env, "obstacles", [])):
         is_dyn = bool(obs.get("is_dynamic", False)) if isinstance(obs, dict) else bool(getattr(obs, "is_dynamic", False))
         ox = float(obs.get("x", 0.0)) if isinstance(obs, dict) else float(getattr(obs, "x"))
         oy = float(obs.get("y", 0.0)) if isinstance(obs, dict) else float(getattr(obs, "y"))
+        orad = float(obs.get("radius", 0.2)) if isinstance(obs, dict) else float(getattr(obs, "radius"))
         if is_dyn:
             dyn_idx.append(i)
         else:
-            static_obs.append((ox, oy))
+            static_obs.append((ox, oy, orad))
 
     dyn_trajs: List[List[Tuple[float, float]]] = [[] for _ in dyn_idx]
+    dyn_radii: List[float] = []
     for k, i in enumerate(dyn_idx):
         obs = env.obstacles[i]
         ox = float(obs.get("x", 0.0)) if isinstance(obs, dict) else float(getattr(obs, "x"))
         oy = float(obs.get("y", 0.0)) if isinstance(obs, dict) else float(getattr(obs, "y"))
+        orad = float(obs.get("radius", 0.2)) if isinstance(obs, dict) else float(getattr(obs, "radius"))
         dyn_trajs[k].append((ox, oy))
+        dyn_radii.append(orad)
 
     done = False
     info = {"reason": None}
@@ -292,12 +297,13 @@ def rollout_one(policy: Any, cfg: StateCfg, seed: int, max_steps: int, speed_min
         goal=(float(env.goal_x), float(env.goal_y)),
         static_obs=static_obs,
         dyn_trajs=dyn_trajs,
+        dyn_radii=dyn_radii,
     )
     env.close()
     return out
 
 
-def _draw_dynamic_trend(ax, dyn_trajs: List[List[Tuple[float, float]]]) -> None:
+def _draw_dynamic_trend(ax, dyn_trajs: List[List[Tuple[float, float]]], dyn_radii: List[float]) -> None:
     """动态障碍物：轨迹 + 运动趋势 + 起终点样式。
 
     - 起点：蓝色实心圆
@@ -305,7 +311,7 @@ def _draw_dynamic_trend(ax, dyn_trajs: List[List[Tuple[float, float]]]) -> None:
     - 轨迹：红色线
     - 动态障碍物点：红色圆点（当前位置）
     """
-    for traj in dyn_trajs:
+    for idx, traj in enumerate(dyn_trajs):
         if len(traj) < 1:
             continue
         xs = [p[0] for p in traj]
@@ -318,8 +324,10 @@ def _draw_dynamic_trend(ax, dyn_trajs: List[List[Tuple[float, float]]]) -> None:
         # 起点：蓝色实心圆
         ax.scatter([xs[0]], [ys[0]], s=34, c="#1f77b4", marker="o", zorder=7)
 
-        # 动态障碍物当前位置：红色圆点
-        ax.scatter([xs[-1]], [ys[-1]], s=24, c="#d62728", marker="o", zorder=8)
+        # 动态障碍物当前位置：红色实心圆（按真实半径）
+        r = dyn_radii[idx] if idx < len(dyn_radii) else 0.2
+        import matplotlib.pyplot as plt
+        ax.add_patch(plt.Circle((xs[-1], ys[-1]), radius=r, facecolor="#d62728", edgecolor="#d62728", alpha=0.35, linewidth=1.0, zorder=8))
 
         # 终点：黑色空心圆
         ax.scatter(
@@ -384,12 +392,13 @@ def save_compare_png(ddpg: Rollout, att: Rollout, out_path: str, seed: int) -> N
     gx, gy = ddpg.goal
     ax.scatter([gx], [gy], marker='*', s=90, c='green', zorder=7)
 
-    # 静态障碍物：灰色圆点
-    if ddpg.static_obs:
-        ax.scatter([p[0] for p in ddpg.static_obs], [p[1] for p in ddpg.static_obs], s=20, c='gray', marker='o', alpha=0.85, zorder=3)
+    # 静态障碍物：灰色圆（按真实半径）
+    import matplotlib.pyplot as plt
+    for x, y, r in ddpg.static_obs:
+        ax.add_patch(plt.Circle((x, y), radius=r, facecolor='0.7', edgecolor='0.55', alpha=0.7, linewidth=1.0, zorder=3))
 
     # 动态障碍物趋势 + 轨迹：红色
-    _draw_dynamic_trend(ax, ddpg.dyn_trajs)
+    _draw_dynamic_trend(ax, ddpg.dyn_trajs, ddpg.dyn_radii)
 
     # 两条机器人轨迹（同为蓝色，线型区分）
     _draw_robot_traj(ax, ddpg.robot_traj, f"DDPG steps={ddpg.steps}, {ddpg.reason}", linestyle='-')
