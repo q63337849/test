@@ -239,10 +239,22 @@ class HybridTrajectoryPlanner:
         self.stats.global_plan_time_sec += time.perf_counter() - t0
         return self.global_path
 
-    @staticmethod
-    def _extract_lidar_from_state(state: np.ndarray) -> np.ndarray:
-        """从状态向量中提取 LiDAR 距离（米）。"""
-        return np.asarray(state[:EnvConfig.LIDAR_RAYS], dtype=np.float32) * float(EnvConfig.LIDAR_MAX_RANGE)
+    def _get_current_lidar_ranges(self, state: np.ndarray) -> np.ndarray:
+        """获取当前LiDAR距离（米）。
+
+        优先使用环境 LiDAR 的最近一次真实扫描，避免 Enhanced state 下索引错位。
+        """
+        last = getattr(self.env.lidar, "last_readings", None)
+        if last is not None:
+            arr = np.asarray(last, dtype=np.float32)
+            if arr.size == EnvConfig.LIDAR_RAYS:
+                return np.clip(arr, EnvConfig.LIDAR_MIN_RANGE, EnvConfig.LIDAR_MAX_RANGE)
+
+        # 兜底：若无法读取 last_readings，再尝试从状态前32维恢复
+        raw = np.asarray(state[:EnvConfig.LIDAR_RAYS], dtype=np.float32)
+        if np.max(raw) <= 1.5 and np.min(raw) >= -0.5:
+            raw = raw * float(EnvConfig.LIDAR_MAX_RANGE)
+        return np.clip(raw, EnvConfig.LIDAR_MIN_RANGE, EnvConfig.LIDAR_MAX_RANGE)
 
     # ------------------------ 感知/安全 ------------------------
 
@@ -447,7 +459,7 @@ class HybridTrajectoryPlanner:
             obstacles = self.get_planner_obstacles()
             local_goal, goal_idx = self.select_local_goal(self.cfg.lookahead_distance, obstacles)
             heading = self.env._get_heading_to_goal()
-            lidar = self._extract_lidar_from_state(state)
+            lidar = self._get_current_lidar_ranges(state)
 
             prev_mode = self.mode
             self._maybe_switch_mode(local_goal, obstacles, lidar, heading)
@@ -466,7 +478,7 @@ class HybridTrajectoryPlanner:
             total_reward += reward
             trajectory.append((self.env.robot.x, self.env.robot.y))
 
-            lidar = self._extract_lidar_from_state(state)
+            lidar = self._get_current_lidar_ranges(state)
             heading = self.env._get_heading_to_goal()
             min_front = self._forward_sector_min_range(lidar, heading)
             self.trace.min_lidar_front = min(self.trace.min_lidar_front, float(min_front))

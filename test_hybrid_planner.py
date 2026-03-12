@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from collections import Counter
 
 import numpy as np
@@ -24,6 +25,46 @@ import numpy as np
 from environment import NavigationEnv
 from hybrid_path_planner import HybridConfig, HybridTrajectoryPlanner
 from config import EnvConfig
+
+
+def _save_episode_plot(env: NavigationEnv, planner: HybridTrajectoryPlanner, result: dict, ep_idx: int, plot_dir: str) -> str:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle
+
+    os.makedirs(plot_dir, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    # 障碍物（终止时刻位置）
+    for obs in env.obstacles:
+        color = "tab:red" if obs.is_dynamic else "tab:orange"
+        ax.add_patch(Circle((obs.x, obs.y), obs.radius, color=color, alpha=0.25))
+
+    # 全局参考路径
+    if planner.global_path is not None and len(planner.global_path) > 0:
+        gp = planner.global_path
+        ax.plot(gp[:, 0], gp[:, 1], "--", color="tab:green", linewidth=1.0, label="global_path")
+
+    # 实际轨迹
+    tr = result["trajectory"]
+    ax.plot(tr[:, 0], tr[:, 1], "-", color="tab:blue", linewidth=1.5, label="executed_trajectory")
+    ax.scatter(tr[0, 0], tr[0, 1], c="green", s=40, label="start")
+    ax.scatter(env.goal_x, env.goal_y, c="red", s=50, marker="*", label="goal")
+
+    ax.set_xlim(0, EnvConfig.MAP_WIDTH)
+    ax.set_ylim(0, EnvConfig.MAP_HEIGHT)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, linestyle=":", linewidth=0.6)
+    ax.set_title(f"Episode {ep_idx:03d} | success={result['success']} | reason={result['reason']}")
+    ax.legend(loc="best")
+
+    out = os.path.join(plot_dir, f"hybrid_episode_{ep_idx:03d}.png")
+    plt.tight_layout()
+    plt.savefig(out, dpi=160)
+    plt.close(fig)
+    return out
 
 
 def _build_local_policy(att_model: str, state_dim: int, action_dim: int):
@@ -126,10 +167,15 @@ def run(args: argparse.Namespace) -> None:
         results.append(out)
         reason_counter[out["reason"]] += 1
 
+        plot_path = ""
+        if args.save_plots:
+            plot_path = _save_episode_plot(env, planner, out, ep + 1, args.plot_dir)
+
         print(
             f"[EP {ep + 1:03d}] success={out['success']} steps={out['steps']} "
             f"reason={out['reason']} mode_end={out['mode']} "
             f"replan={out['stats'].replan_count} trigger={out['stats'].trigger_count}"
+            f" plot={plot_path if plot_path else 'off'}"
         )
 
     success_rate = 100.0 * np.mean([r["success"] for r in results])
@@ -184,5 +230,7 @@ if __name__ == "__main__":
     parser.add_argument("--fast_iteration_cap", type=int, default=40)
     parser.add_argument("--max_replans_per_episode", type=int, default=2)
     parser.add_argument("--global_corridor_width", type=float, default=10.0)
+    parser.add_argument("--save_plots", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--plot_dir", type=str, default="results/hybrid_plots")
 
     run(parser.parse_args())
