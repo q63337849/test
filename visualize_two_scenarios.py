@@ -109,6 +109,27 @@ def _iter_obstacles(env: NavigationEnv):
         yield x, y, r, is_dyn
 
 
+def _get_dynamic_heading(obs, traj: List[Tuple[float, float]] | None = None) -> Tuple[float, float]:
+    """返回动态障碍物朝向向量（单位向量）。
+
+    优先使用障碍物自身速度 vx/vy；若速度过小，再退化到轨迹末两点估计方向。
+    """
+    vx = float(getattr(obs, "vx", 0.0))
+    vy = float(getattr(obs, "vy", 0.0))
+    norm = float(np.hypot(vx, vy))
+    if norm > 1e-8:
+        return vx / norm, vy / norm
+
+    if traj is not None and len(traj) >= 2:
+        dx = float(traj[-1][0] - traj[-2][0])
+        dy = float(traj[-1][1] - traj[-2][1])
+        norm = float(np.hypot(dx, dy))
+        if norm > 1e-8:
+            return dx / norm, dy / norm
+
+    return 0.0, 0.0
+
+
 def init_dynamic_trajs(env: NavigationEnv) -> dict[int, List[Tuple[float, float]]]:
     """初始化动态障碍物轨迹。
 
@@ -180,6 +201,31 @@ def draw_env(ax, env: NavigationEnv, title: str, dyn_trajs: dict[int, List[Tuple
         else:
             circ = plt.Circle((x, y), radius=r, fill=True, alpha=0.55, facecolor="0.7", edgecolor="0.55", linewidth=1)
         ax.add_patch(circ)
+
+    # 动态障碍物运动方向（箭头）
+    for idx, obs in enumerate(getattr(env, "obstacles", [])):
+        if isinstance(obs, dict) or (not bool(getattr(obs, "is_dynamic", False))):
+            continue
+
+        ux, uy = _get_dynamic_heading(obs, None if dyn_trajs is None else dyn_trajs.get(idx))
+        if abs(ux) + abs(uy) < 1e-8:
+            continue
+
+        arrow_len = max(0.2, float(getattr(obs, "radius", 0.2)) * 2.0)
+        ax.arrow(
+            float(getattr(obs, "x")),
+            float(getattr(obs, "y")),
+            ux * arrow_len,
+            uy * arrow_len,
+            head_width=0.08,
+            head_length=0.12,
+            fc="darkred",
+            ec="darkred",
+            linewidth=1.2,
+            alpha=0.95,
+            length_includes_head=True,
+            zorder=5,
+        )
 
     # 机器人
     rx, ry = float(env.robot.x), float(env.robot.y)
