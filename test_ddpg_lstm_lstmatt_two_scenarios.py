@@ -99,6 +99,59 @@ def action_clip(a: np.ndarray) -> np.ndarray:
     return np.array([a0, a1], dtype=np.float32)
 
 
+def infer_ddpg_state_dim_from_ckpt(ddpg_ckpt: Any) -> int:
+    """从多种 DDPG checkpoint 格式中推断 state_dim。"""
+
+    def _extract_actor_sd(obj: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(obj, dict):
+            return None
+        # 常见：完整 checkpoint
+        if isinstance(obj.get("actor_local"), dict):
+            return obj.get("actor_local")
+        # 直接 actor state_dict
+        if any(isinstance(v, np.ndarray) for v in obj.values()):
+            return obj
+        try:
+            import torch
+            if any(torch.is_tensor(v) for v in obj.values()):
+                return obj
+        except Exception:
+            pass
+        return None
+
+    actor_sd = _extract_actor_sd(ddpg_ckpt)
+    if actor_sd is None:
+        raise RuntimeError("ddpg_model 不是可识别的 checkpoint/state_dict 格式，无法提取 actor 权重。")
+
+    # 优先匹配常见第一层命名
+    preferred = (
+        "fc1.weight",
+        "linear1.weight",
+        "actor.fc1.weight",
+        "actor.linear1.weight",
+        "mlp.0.weight",
+        "net.0.weight",
+        "model.0.weight",
+    )
+    for k in preferred:
+        w = actor_sd.get(k, None)
+        if getattr(w, "ndim", None) == 2:
+            return int(w.shape[1])
+
+    # 回退：从所有二维权重里取 in_features 最小值（通常对应第一层输入维度）
+    candidates: List[int] = []
+    for _, w in actor_sd.items():
+        if getattr(w, "ndim", None) == 2:
+            candidates.append(int(w.shape[1]))
+
+    if candidates:
+        return int(min(candidates))
+
+    raise RuntimeError(
+        "无法从 ddpg_model 推断 state_dim：未找到可用的二维线性层权重。"
+    )
+
+
 # -----------------------------
 # State cfg inference
 # -----------------------------
@@ -860,17 +913,8 @@ def main() -> None:
         raise RuntimeError("att_model 不是预期的 checkpoint(dict)，缺少 actor_local。")
 
     # ----------------- infer state cfg -----------------
-    # DDPG：从 actor_local 第一层输入维度推断
-    if isinstance(ddpg_ckpt, dict) and ("actor_local" in ddpg_ckpt):
-        w = ddpg_ckpt["actor_local"]["fc1.weight"]
-        ddpg_state_dim = int(w.shape[1])
-    else:
-        # 也可能是直接保存的 state_dict
-        if isinstance(ddpg_ckpt, dict) and ("fc1.weight" in ddpg_ckpt):
-            ddpg_state_dim = int(ddpg_ckpt["fc1.weight"].shape[1])
-        else:
-            raise RuntimeError("无法从 ddpg_model 推断 state_dim：未找到 fc1.weight。")
-
+    # DDPG：兼容多种 checkpoint 键名（fc1/linear1/...）
+    ddpg_state_dim = infer_ddpg_state_dim_from_ckpt(ddpg_ckpt)
     ddpg_cfg = infer_state_cfg_from_state_dim(ddpg_state_dim)
     print(f"[DDPG] inferred state_dim={ddpg_state_dim} -> {ddpg_cfg}")
 
