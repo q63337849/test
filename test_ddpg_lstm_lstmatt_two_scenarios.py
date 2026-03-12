@@ -88,6 +88,38 @@ def ensure_dir(p: str) -> None:
         os.makedirs(p, exist_ok=True)
 
 
+def resolve_model_path(path: str, model_dir: str = "") -> str:
+    """解析模型路径：优先原路径，其次在 model_dir 下查找同名文件。"""
+    p = str(path)
+    if os.path.exists(p):
+        return p
+    if model_dir:
+        alt = os.path.join(str(model_dir), os.path.basename(p))
+        if os.path.exists(alt):
+            return alt
+    return p
+
+
+def _iter_obstacles_with_vel(env: NavigationEnv):
+    """yield: (idx, x, y, r, is_dyn, vx, vy)"""
+    for idx, obs in enumerate(getattr(env, "obstacles", [])):
+        if isinstance(obs, dict):
+            x = float(obs.get("x", 0.0))
+            y = float(obs.get("y", 0.0))
+            r = float(obs.get("radius", 0.2))
+            is_dyn = bool(obs.get("is_dynamic", False))
+            vx = float(obs.get("vx", 0.0))
+            vy = float(obs.get("vy", 0.0))
+        else:
+            x = float(getattr(obs, "x"))
+            y = float(getattr(obs, "y"))
+            r = float(getattr(obs, "radius"))
+            is_dyn = bool(getattr(obs, "is_dynamic", False))
+            vx = float(getattr(obs, "vx", 0.0))
+            vy = float(getattr(obs, "vy", 0.0))
+        yield idx, x, y, r, is_dyn, vx, vy
+
+
 def parse_patterns(s: str) -> Tuple[str, ...]:
     items = [x.strip() for x in str(s).split(",") if x.strip()]
     return tuple(items)
@@ -97,6 +129,59 @@ def action_clip(a: np.ndarray) -> np.ndarray:
     a0 = float(np.clip(a[0], 0.0, EnvConfig.MAX_LINEAR_VEL))
     a1 = float(np.clip(a[1], -EnvConfig.MAX_ANGULAR_VEL, EnvConfig.MAX_ANGULAR_VEL))
     return np.array([a0, a1], dtype=np.float32)
+
+
+def infer_ddpg_state_dim_from_ckpt(ddpg_ckpt: Any) -> int:
+    """从多种 DDPG checkpoint 格式中推断 state_dim。"""
+
+    def _extract_actor_sd(obj: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(obj, dict):
+            return None
+        # 常见：完整 checkpoint
+        if isinstance(obj.get("actor_local"), dict):
+            return obj.get("actor_local")
+        # 直接 actor state_dict
+        if any(isinstance(v, np.ndarray) for v in obj.values()):
+            return obj
+        try:
+            import torch
+            if any(torch.is_tensor(v) for v in obj.values()):
+                return obj
+        except Exception:
+            pass
+        return None
+
+    actor_sd = _extract_actor_sd(ddpg_ckpt)
+    if actor_sd is None:
+        raise RuntimeError("ddpg_model 不是可识别的 checkpoint/state_dict 格式，无法提取 actor 权重。")
+
+    # 优先匹配常见第一层命名
+    preferred = (
+        "fc1.weight",
+        "linear1.weight",
+        "actor.fc1.weight",
+        "actor.linear1.weight",
+        "mlp.0.weight",
+        "net.0.weight",
+        "model.0.weight",
+    )
+    for k in preferred:
+        w = actor_sd.get(k, None)
+        if getattr(w, "ndim", None) == 2:
+            return int(w.shape[1])
+
+    # 回退：从所有二维权重里取 in_features 最小值（通常对应第一层输入维度）
+    candidates: List[int] = []
+    for _, w in actor_sd.items():
+        if getattr(w, "ndim", None) == 2:
+            candidates.append(int(w.shape[1]))
+
+    if candidates:
+        return int(min(candidates))
+
+    raise RuntimeError(
+        "无法从 ddpg_model 推断 state_dim：未找到可用的二维线性层权重。"
+    )
 
 
 # -----------------------------
@@ -379,15 +464,20 @@ class DDPGPolicy(PolicyBase):
         self.device = device
 
         from ddpg import DDPGAgent
+        import inspect
 
-        # 用很小的 buffer/batch 也无所谓（只评测 act）
-        self.agent = DDPGAgent(
+        # 兼容不同 DDPGAgent 构造签名（有些版本没有 random_seed）
+        kwargs = dict(
             state_dim=self.state_dim,
             action_dim=2,
             random_seed=0,
             batch_size=64,
             buffer_size=1000,
         )
+        sig = inspect.signature(DDPGAgent.__init__)
+        kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+
+        self.agent = DDPGAgent(**kwargs)
         self.agent.load(model_path)
 
     def act(self, state_seq: np.ndarray) -> np.ndarray:
@@ -493,6 +583,18 @@ class EvalResult:
     dt_p90_ms: float
     dt_p95_ms: float
     gif_path: str = ""
+
+
+@dataclass
+class TrajectoryRollout:
+    algo: str
+    scenario: str
+    reason: str
+    steps: int
+    total_reward: float
+    robot_traj: List[Tuple[float, float]]
+    init_obstacles: List[Tuple[float, float, float, bool]]
+    goal_xy: Tuple[float, float]
 
 
 def evaluate_policy(
@@ -607,6 +709,139 @@ def evaluate_policy(
     return res
 
 
+def rollout_single_episode(
+    policy: PolicyBase,
+    cfg: StateCfg,
+    scenario_name: str,
+    seed: int,
+    n_static: int,
+    n_dynamic: int,
+    dynamic_speed_min: float,
+    dynamic_speed_max: float,
+    dynamic_patterns: Tuple[str, ...],
+    dynamic_stop_prob: float,
+    max_steps: int,
+) -> TrajectoryRollout:
+    """在指定场景跑 1 个 episode，返回机器人轨迹用于可视化对比。"""
+    set_global_seed(int(seed))
+    env = build_env(
+        cfg,
+        n_static=n_static,
+        n_dynamic=n_dynamic,
+        dynamic_speed_min=dynamic_speed_min,
+        dynamic_speed_max=dynamic_speed_max,
+        dynamic_patterns=dynamic_patterns,
+        dynamic_stop_prob=dynamic_stop_prob,
+    )
+
+    state = env.reset()
+    policy.reset()
+
+    if policy.history_len > 1:
+        from collections import deque
+        q = deque([state.copy() for _ in range(policy.history_len)], maxlen=policy.history_len)
+
+    robot_traj: List[Tuple[float, float]] = [(float(env.robot.x), float(env.robot.y))]
+    init_obstacles: List[Tuple[float, float, float, bool]] = []
+    for _, x, y, r, is_dyn, _, _ in _iter_obstacles_with_vel(env):
+        init_obstacles.append((x, y, r, is_dyn))
+
+    total_reward = 0.0
+    done = False
+    info: Dict[str, Any] = {"reason": None}
+
+    step = 0
+    while (not done) and (step < int(max_steps)):
+        if policy.history_len > 1:
+            s_in = np.stack(list(q), axis=0)
+        else:
+            s_in = state
+
+        a = policy.act(s_in)
+        next_state, reward, done, info = env.step(a)
+        total_reward += float(reward)
+        state = next_state
+
+        if policy.history_len > 1:
+            q.append(state.copy())
+
+        robot_traj.append((float(env.robot.x), float(env.robot.y)))
+        step += 1
+
+    reason = str(info.get("reason", "max_steps"))
+    if (not done) and step >= int(max_steps):
+        reason = "max_steps"
+
+    result = TrajectoryRollout(
+        algo=policy.name,
+        scenario=scenario_name,
+        reason=reason,
+        steps=step,
+        total_reward=float(total_reward),
+        robot_traj=robot_traj,
+        init_obstacles=init_obstacles,
+        goal_xy=(float(env.goal_x), float(env.goal_y)),
+    )
+    env.close()
+    return result
+
+
+def save_train_traj_compare_png(
+    ddpg_rollout: TrajectoryRollout,
+    att_rollout: TrajectoryRollout,
+    out_path: str,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    w, h = float(EnvConfig.MAP_WIDTH), float(EnvConfig.MAP_HEIGHT)
+    fig, ax = plt.subplots(1, 1, figsize=(6.6, 6.0), dpi=130)
+
+    ax.set_xlim(0, w)
+    ax.set_ylim(0, h)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    ax.plot([0, w, w, 0, 0], [0, 0, h, h, 0], linewidth=1.0, color="black")
+
+    gx, gy = ddpg_rollout.goal_xy
+    goal = plt.Circle((gx, gy), radius=float(EnvConfig.GOAL_RADIUS), fill=False, linewidth=2, edgecolor="green")
+    ax.add_patch(goal)
+
+    for x, y, r, is_dyn in ddpg_rollout.init_obstacles:
+        if is_dyn:
+            circ = plt.Circle((x, y), radius=r, fill=True, alpha=0.30, facecolor="#ff7f7f", edgecolor="#d62728", linewidth=1)
+        else:
+            circ = plt.Circle((x, y), radius=r, fill=True, alpha=0.50, facecolor="0.7", edgecolor="0.55", linewidth=1)
+        ax.add_patch(circ)
+
+    def _plot_traj(traj: List[Tuple[float, float]], color: str, label: str):
+        if len(traj) >= 2:
+            xs = [p[0] for p in traj]
+            ys = [p[1] for p in traj]
+            ax.plot(xs, ys, color=color, linewidth=2.0, label=label)
+            ax.scatter([xs[0]], [ys[0]], marker="o", s=20, color=color, alpha=0.9)
+            ax.scatter([xs[-1]], [ys[-1]], marker="x", s=36, color=color, alpha=0.95)
+
+    _plot_traj(
+        ddpg_rollout.robot_traj,
+        "#1f77b4",
+        f"DDPG (steps={ddpg_rollout.steps}, reason={ddpg_rollout.reason})",
+    )
+    _plot_traj(
+        att_rollout.robot_traj,
+        "#ff7f0e",
+        f"LSTM-DDPG-Attention (steps={att_rollout.steps}, reason={att_rollout.reason})",
+    )
+
+    ax.set_title("Training Scene Trajectory Compare: DDPG vs LSTM-DDPG-Attention")
+    ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
 def print_table(results: List[EvalResult]) -> None:
     # 统一对齐输出
     headers = [
@@ -656,6 +891,7 @@ def main() -> None:
     parser.add_argument("--ddpg_model", type=str, required=True)
     parser.add_argument("--lstm_model", type=str, required=True)
     parser.add_argument("--att_model", type=str, required=True)
+    parser.add_argument("--model_dir", type=str, default="", help="可选：模型所在目录；当 --*_model 为相对名且原路径不存在时，会在该目录下查找")
 
     parser.add_argument("--episodes", type=int, default=200)
     parser.add_argument("--seed", type=int, default=0)
@@ -679,6 +915,13 @@ def main() -> None:
     parser.add_argument("--gif_fps", type=int, default=15)
     parser.add_argument("--gif_stride", type=int, default=1)
 
+    # 训练场景单回合轨迹对比（DDPG vs LSTM-DDPG-Attention）
+    parser.add_argument("--save_train_traj_compare", action="store_true")
+    parser.add_argument("--train_traj_out", type=str, default="ddpg_vs_lstmatt_train_traj.png")
+    parser.add_argument("--train_traj_seed", type=int, default=None, help="轨迹对比使用的随机种子，默认沿用 --seed")
+    parser.add_argument("--train_traj_max_steps", type=int, default=int(getattr(EnvConfig, "MAX_STEPS", 500)))
+    parser.add_argument("--only_train_traj_compare", action="store_true", help="仅生成训练场景轨迹对比图，不跑完整评测")
+
     args = parser.parse_args()
 
     ensure_dir(args.gif_dir)
@@ -697,28 +940,23 @@ def main() -> None:
     print("=" * 70)
 
     # ----------------- load ckpts -----------------
-    ddpg_ckpt = safe_torch_load(args.ddpg_model, map_location="cpu")
+    ddpg_model_path = resolve_model_path(args.ddpg_model, args.model_dir)
+    lstm_model_path = resolve_model_path(args.lstm_model, args.model_dir)
+    att_model_path = resolve_model_path(args.att_model, args.model_dir)
 
-    lstm_ckpt = safe_torch_load(args.lstm_model, map_location="cpu")
+    ddpg_ckpt = safe_torch_load(ddpg_model_path, map_location="cpu")
+
+    lstm_ckpt = safe_torch_load(lstm_model_path, map_location="cpu")
     if not isinstance(lstm_ckpt, dict) or ("actor_local" not in lstm_ckpt):
         raise RuntimeError("lstm_model 不是预期的 checkpoint(dict)，缺少 actor_local。")
 
-    att_ckpt = safe_torch_load(args.att_model, map_location="cpu")
+    att_ckpt = safe_torch_load(att_model_path, map_location="cpu")
     if not isinstance(att_ckpt, dict) or ("actor_local" not in att_ckpt):
         raise RuntimeError("att_model 不是预期的 checkpoint(dict)，缺少 actor_local。")
 
     # ----------------- infer state cfg -----------------
-    # DDPG：从 actor_local 第一层输入维度推断
-    if isinstance(ddpg_ckpt, dict) and ("actor_local" in ddpg_ckpt):
-        w = ddpg_ckpt["actor_local"]["fc1.weight"]
-        ddpg_state_dim = int(w.shape[1])
-    else:
-        # 也可能是直接保存的 state_dict
-        if isinstance(ddpg_ckpt, dict) and ("fc1.weight" in ddpg_ckpt):
-            ddpg_state_dim = int(ddpg_ckpt["fc1.weight"].shape[1])
-        else:
-            raise RuntimeError("无法从 ddpg_model 推断 state_dim：未找到 fc1.weight。")
-
+    # DDPG：兼容多种 checkpoint 键名（fc1/linear1/...）
+    ddpg_state_dim = infer_ddpg_state_dim_from_ckpt(ddpg_ckpt)
     ddpg_cfg = infer_state_cfg_from_state_dim(ddpg_state_dim)
     print(f"[DDPG] inferred state_dim={ddpg_state_dim} -> {ddpg_cfg}")
 
@@ -767,15 +1005,57 @@ def main() -> None:
 
     # ----------------- build policies -----------------
     # 注意：这些 agent 内部会创建 torch 模型；如果你想强制 GPU，可在各自模块里改 device
-    ddpg_policy = DDPGPolicy(args.ddpg_model, state_dim=ddpg_state_dim)
-    lstm_policy = LSTMPolicy(args.lstm_model, ckpt=lstm_ckpt, state_dim=env_tmp.state_dim)
-    att_policy = LSTMAttPolicy(args.att_model, ckpt=att_ckpt, state_dim=env_tmp2.state_dim)
+    ddpg_policy = DDPGPolicy(ddpg_model_path, state_dim=ddpg_state_dim)
+    lstm_policy = LSTMPolicy(lstm_model_path, ckpt=lstm_ckpt, state_dim=env_tmp.state_dim)
+    att_policy = LSTMAttPolicy(att_model_path, ckpt=att_ckpt, state_dim=env_tmp2.state_dim)
 
     policies: List[Tuple[PolicyBase, StateCfg]] = [
         (ddpg_policy, ddpg_cfg),
         (lstm_policy, lstm_cfg),
         (att_policy, att_cfg),
     ]
+
+    # ----------------- optional: training-scene trajectory compare (DDPG vs ATT) -----------------
+    if args.save_train_traj_compare or args.only_train_traj_compare:
+        traj_seed = int(args.seed if args.train_traj_seed is None else args.train_traj_seed)
+        print("\n" + "=" * 70)
+        print(f"Trajectory compare on training scene (seed={traj_seed})")
+        print("=" * 70)
+
+        ddpg_rollout = rollout_single_episode(
+            policy=ddpg_policy,
+            cfg=ddpg_cfg,
+            scenario_name="scene_train",
+            seed=traj_seed,
+            n_static=args.base_static,
+            n_dynamic=args.base_dynamic,
+            dynamic_speed_min=args.dynamic_speed_min,
+            dynamic_speed_max=args.dynamic_speed_max,
+            dynamic_patterns=dyn_patterns,
+            dynamic_stop_prob=args.dynamic_stop_prob,
+            max_steps=args.train_traj_max_steps,
+        )
+        att_rollout = rollout_single_episode(
+            policy=att_policy,
+            cfg=att_cfg,
+            scenario_name="scene_train",
+            seed=traj_seed,
+            n_static=args.base_static,
+            n_dynamic=args.base_dynamic,
+            dynamic_speed_min=args.dynamic_speed_min,
+            dynamic_speed_max=args.dynamic_speed_max,
+            dynamic_patterns=dyn_patterns,
+            dynamic_stop_prob=args.dynamic_stop_prob,
+            max_steps=args.train_traj_max_steps,
+        )
+
+        save_train_traj_compare_png(ddpg_rollout, att_rollout, args.train_traj_out)
+        print(f"Saved trajectory compare: {args.train_traj_out}")
+        print(f"  DDPG: steps={ddpg_rollout.steps}, reason={ddpg_rollout.reason}, return={ddpg_rollout.total_reward:.2f}")
+        print(f"  ATT : steps={att_rollout.steps}, reason={att_rollout.reason}, return={att_rollout.total_reward:.2f}")
+
+        if args.only_train_traj_compare:
+            return
 
     results: List[EvalResult] = []
 
