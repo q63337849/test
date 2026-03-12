@@ -23,6 +23,7 @@ import numpy as np
 
 from environment import NavigationEnv
 from hybrid_path_planner import HybridConfig, HybridTrajectoryPlanner
+from config import EnvConfig
 
 
 def _build_local_policy(att_model: str, state_dim: int, action_dim: int):
@@ -45,12 +46,24 @@ def _build_local_policy(att_model: str, state_dim: int, action_dim: int):
         temporal_att_dim=64,
         temporal_att_heads=4,
     )
-    agent.load(att_model, strict=False)
+    agent.load(att_model, strict=False, load_optimizers=False)
     return agent
+
+
+def _apply_env_overrides(args: argparse.Namespace) -> None:
+    """将测试参数写入 EnvConfig，便于构造 50m×50m 等大规模测试环境。"""
+    EnvConfig.MAP_WIDTH = float(args.map_width)
+    EnvConfig.MAP_HEIGHT = float(args.map_height)
+    EnvConfig.NUM_STATIC_OBSTACLES = int(args.num_static_obstacles)
+    EnvConfig.NUM_DYNAMIC_OBSTACLES = int(args.num_dynamic_obstacles)
+    EnvConfig.MAX_STEPS = int(args.max_steps)
+    EnvConfig.LIDAR_MAX_RANGE = float(args.lidar_max_range)
+    EnvConfig.GOAL_RADIUS = float(args.goal_radius)
 
 
 def run(args: argparse.Namespace) -> None:
     np.random.seed(args.seed)
+    _apply_env_overrides(args)
 
     env = NavigationEnv(
         use_enhanced_state=True,
@@ -83,6 +96,19 @@ def run(args: argparse.Namespace) -> None:
 
     results = []
     reason_counter = Counter()
+
+    print("=" * 72)
+    print("Test Environment Design")
+    print("=" * 72)
+    print(f"map: {EnvConfig.MAP_WIDTH:.1f}m x {EnvConfig.MAP_HEIGHT:.1f}m")
+    print(f"static_obstacles: {EnvConfig.NUM_STATIC_OBSTACLES}")
+    print(f"dynamic_obstacles: {EnvConfig.NUM_DYNAMIC_OBSTACLES}")
+    print(f"dynamic_speed: [{args.dynamic_speed_min:.2f}, {args.dynamic_speed_max:.2f}] m/s")
+    print(f"lidar: rays={EnvConfig.LIDAR_RAYS}, range={EnvConfig.LIDAR_MAX_RANGE:.1f}m, fov={EnvConfig.LIDAR_FOV}°")
+    print(f"goal_radius: {EnvConfig.GOAL_RADIUS:.2f}m")
+    print(f"control_dt: {EnvConfig.DT:.2f}s, max_steps={EnvConfig.MAX_STEPS}")
+    print(f"planner: MIDBO(pop={args.midbo_population}, iter={args.midbo_iterations}, wp={args.waypoint_count})")
+    print("=" * 72)
 
     for ep in range(args.episodes):
         planner.global_path = np.empty((0, 2), dtype=np.float32)
@@ -120,6 +146,14 @@ if __name__ == "__main__":
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--max_steps", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
+
+    # 测试环境设计参数（默认按文档的大规模设置）
+    parser.add_argument("--map_width", type=float, default=50.0)
+    parser.add_argument("--map_height", type=float, default=50.0)
+    parser.add_argument("--num_static_obstacles", type=int, default=40)
+    parser.add_argument("--num_dynamic_obstacles", type=int, default=20)
+    parser.add_argument("--lidar_max_range", type=float, default=5.0)
+    parser.add_argument("--goal_radius", type=float, default=0.30)
 
     parser.add_argument("--att_model", type=str, default="")
 
