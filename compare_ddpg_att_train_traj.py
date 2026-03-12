@@ -1,18 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""独立轨迹对比脚本（不依赖/不修改现有测试脚本）
+"""独立轨迹对比脚本（不修改原有工程脚本）
 
-功能：
-- 在训练场景中，对 DDPG 与 LSTM-DDPG-Attention 各跑 1 个 episode
-- 保存同图轨迹对比 PNG
-- 支持模型放在新目录（--model_dir）
-
-用法：
-python compare_ddpg_att_train_traj.py \
-  --ddpg_model ddpg_best.pth \
-  --att_model lstm_ddpg_att_best.pth \
-  --model_dir models \
-  --out ddpg_vs_att_train_traj.png
+按用户要求绘图规范：
+- 起点：蓝色实心圆
+- 终点：黑色空心圆
+- 静态障碍物：灰色圆点
+- 动态障碍物：红色圆点
+- 动态障碍物：绘制运动趋势箭头 + 轨迹
 """
 
 from __future__ import annotations
@@ -105,7 +100,14 @@ def infer_state_cfg_from_state_dim(state_dim: int) -> StateCfg:
                     cands.append(StateCfg(False, n, "min", dis_diff, dis_dyaw))
     if not cands:
         raise RuntimeError(f"无法从 state_dim={state_dim} 推断状态配置")
-    cands.sort(key=lambda c: (1 if c.n_sectors == 16 else 0, 1 if not c.disable_lidar_diff else 0, 1 if not c.disable_delta_yaw else 0), reverse=True)
+    cands.sort(
+        key=lambda c: (
+            1 if c.n_sectors == 16 else 0,
+            1 if not c.disable_lidar_diff else 0,
+            1 if not c.disable_delta_yaw else 0,
+        ),
+        reverse=True,
+    )
     return cands[0]
 
 
@@ -121,7 +123,9 @@ def infer_ddpg_state_dim_from_ckpt(ckpt: Any) -> int:
     if not isinstance(sd, dict):
         raise RuntimeError("ddpg checkpoint 格式不支持")
 
-    preferred = ["fc1.weight", "linear1.weight", "actor.fc1.weight", "actor.linear1.weight", "mlp.0.weight", "net.0.weight"]
+    preferred = [
+        "fc1.weight", "linear1.weight", "actor.fc1.weight", "actor.linear1.weight", "mlp.0.weight", "net.0.weight"
+    ]
     for k in preferred:
         w = sd.get(k)
         if getattr(w, "ndim", None) == 2:
@@ -151,7 +155,6 @@ def state_cfg_from_meta(meta: Dict[str, Any]) -> StateCfg:
 
 class DDPGPolicy:
     history_len = 1
-    name = "DDPG"
 
     def __init__(self, model_path: str, state_dim: int):
         from ddpg import DDPGAgent
@@ -171,8 +174,6 @@ class DDPGPolicy:
 
 
 class AttPolicy:
-    name = "LSTM-DDPG-Attention"
-
     def __init__(self, model_path: str, ckpt: dict, state_dim: int):
         from lstm_ddpg_att import LSTMDdpgAgent
 
@@ -209,12 +210,13 @@ class AttPolicy:
 
 @dataclass
 class Rollout:
-    traj: List[Tuple[float, float]]
+    robot_traj: List[Tuple[float, float]]
     reason: str
     steps: int
     ret: float
-    obstacles0: List[Tuple[float, float, float, bool]]
     goal: Tuple[float, float]
+    static_obs: List[Tuple[float, float]]
+    dyn_trajs: List[List[Tuple[float, float]]]
 
 
 def make_env(cfg: StateCfg, speed_min: float, speed_max: float, patterns: Tuple[str, ...], stop_prob: float) -> NavigationEnv:
@@ -235,13 +237,25 @@ def rollout_one(policy: Any, cfg: StateCfg, seed: int, max_steps: int, speed_min
     if getattr(policy, "history_len", 1) > 1:
         q = deque([s.copy() for _ in range(policy.history_len)], maxlen=policy.history_len)
 
-    traj = [(float(env.robot.x), float(env.robot.y))]
-    obstacles0 = []
-    for obs in getattr(env, "obstacles", []):
-        if isinstance(obs, dict):
-            obstacles0.append((float(obs.get("x", 0.0)), float(obs.get("y", 0.0)), float(obs.get("radius", 0.2)), bool(obs.get("is_dynamic", False))))
+    robot_traj = [(float(env.robot.x), float(env.robot.y))]
+
+    static_obs: List[Tuple[float, float]] = []
+    dyn_idx: List[int] = []
+    for i, obs in enumerate(getattr(env, "obstacles", [])):
+        is_dyn = bool(obs.get("is_dynamic", False)) if isinstance(obs, dict) else bool(getattr(obs, "is_dynamic", False))
+        ox = float(obs.get("x", 0.0)) if isinstance(obs, dict) else float(getattr(obs, "x"))
+        oy = float(obs.get("y", 0.0)) if isinstance(obs, dict) else float(getattr(obs, "y"))
+        if is_dyn:
+            dyn_idx.append(i)
         else:
-            obstacles0.append((float(getattr(obs, "x")), float(getattr(obs, "y")), float(getattr(obs, "radius")), bool(getattr(obs, "is_dynamic", False))))
+            static_obs.append((ox, oy))
+
+    dyn_trajs: List[List[Tuple[float, float]]] = [[] for _ in dyn_idx]
+    for k, i in enumerate(dyn_idx):
+        obs = env.obstacles[i]
+        ox = float(obs.get("x", 0.0)) if isinstance(obs, dict) else float(getattr(obs, "x"))
+        oy = float(obs.get("y", 0.0)) if isinstance(obs, dict) else float(getattr(obs, "y"))
+        dyn_trajs[k].append((ox, oy))
 
     done = False
     info = {"reason": None}
@@ -252,9 +266,18 @@ def rollout_one(policy: Any, cfg: StateCfg, seed: int, max_steps: int, speed_min
         a = policy.act(sin)
         s, r, done, info = env.step(a)
         ret += float(r)
+
         if q is not None:
             q.append(s.copy())
-        traj.append((float(env.robot.x), float(env.robot.y)))
+
+        robot_traj.append((float(env.robot.x), float(env.robot.y)))
+
+        for k, i in enumerate(dyn_idx):
+            obs = env.obstacles[i]
+            ox = float(obs.get("x", 0.0)) if isinstance(obs, dict) else float(getattr(obs, "x"))
+            oy = float(obs.get("y", 0.0)) if isinstance(obs, dict) else float(getattr(obs, "y"))
+            dyn_trajs[k].append((ox, oy))
+
         step += 1
 
     reason = str(info.get("reason", "max_steps"))
@@ -262,52 +285,97 @@ def rollout_one(policy: Any, cfg: StateCfg, seed: int, max_steps: int, speed_min
         reason = "max_steps"
 
     out = Rollout(
-        traj=traj,
+        robot_traj=robot_traj,
         reason=reason,
         steps=step,
         ret=float(ret),
-        obstacles0=obstacles0,
         goal=(float(env.goal_x), float(env.goal_y)),
+        static_obs=static_obs,
+        dyn_trajs=dyn_trajs,
     )
     env.close()
     return out
 
 
+def _draw_dynamic_trend(ax, dyn_trajs: List[List[Tuple[float, float]]]) -> None:
+    for traj in dyn_trajs:
+        if len(traj) < 1:
+            continue
+        xs = [p[0] for p in traj]
+        ys = [p[1] for p in traj]
+
+        # 动态障碍轨迹
+        if len(traj) >= 2:
+            ax.plot(xs, ys, color="#d62728", linewidth=1.2, alpha=0.75)
+
+        # 动态障碍当前位置：红色圆点
+        ax.scatter([xs[-1]], [ys[-1]], s=20, c="#d62728", marker="o", zorder=5)
+
+        # 运动趋势箭头（末两点）
+        if len(traj) >= 2:
+            dx = xs[-1] - xs[-2]
+            dy = ys[-1] - ys[-2]
+            norm = float(np.hypot(dx, dy))
+            if norm > 1e-8:
+                ux, uy = dx / norm, dy / norm
+                ax.arrow(
+                    xs[-1], ys[-1],
+                    ux * 0.22, uy * 0.22,
+                    head_width=0.06, head_length=0.08,
+                    fc="#d62728", ec="#d62728",
+                    linewidth=1.0, alpha=0.9,
+                    length_includes_head=True,
+                    zorder=6,
+                )
+
+
+def _draw_robot_traj(ax, traj: List[Tuple[float, float]], label: str, linestyle: str) -> None:
+    if len(traj) < 1:
+        return
+    xs = [p[0] for p in traj]
+    ys = [p[1] for p in traj]
+
+    if len(traj) >= 2:
+        ax.plot(xs, ys, color="#1f77b4", linewidth=2.0, linestyle=linestyle, label=label)
+
+    # 起点：蓝色实心圆
+    ax.scatter([xs[0]], [ys[0]], s=46, c="#1f77b4", marker="o", zorder=8)
+
+    # 终点：黑色空心圆
+    ax.scatter([xs[-1]], [ys[-1]], s=56, facecolors='none', edgecolors='black', marker='o', linewidths=1.4, zorder=8)
+
+
 def save_compare_png(ddpg: Rollout, att: Rollout, out_path: str) -> None:
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(1, 1, figsize=(6.8, 6.2), dpi=130)
+    fig, ax = plt.subplots(1, 1, figsize=(7.0, 6.3), dpi=130)
     w, h = float(EnvConfig.MAP_WIDTH), float(EnvConfig.MAP_HEIGHT)
     ax.set_xlim(0, w)
     ax.set_ylim(0, h)
     ax.set_aspect("equal", adjustable="box")
     ax.set_xticks([])
     ax.set_yticks([])
+
+    # 边界
     ax.plot([0, w, w, 0, 0], [0, 0, h, h, 0], linewidth=1.0, color="black")
 
+    # 目标
     gx, gy = ddpg.goal
-    ax.add_patch(plt.Circle((gx, gy), radius=float(EnvConfig.GOAL_RADIUS), fill=False, linewidth=2, edgecolor="green"))
+    ax.scatter([gx], [gy], marker='*', s=90, c='green', zorder=7)
 
-    for x, y, r, is_dyn in ddpg.obstacles0:
-        c = "#ff7f7f" if is_dyn else "0.7"
-        ec = "#d62728" if is_dyn else "0.55"
-        alpha = 0.30 if is_dyn else 0.50
-        ax.add_patch(plt.Circle((x, y), radius=r, fill=True, alpha=alpha, facecolor=c, edgecolor=ec, linewidth=1))
+    # 静态障碍物：灰色圆点
+    if ddpg.static_obs:
+        ax.scatter([p[0] for p in ddpg.static_obs], [p[1] for p in ddpg.static_obs], s=20, c='gray', marker='o', alpha=0.85, zorder=3)
 
-    def draw(traj, color, label):
-        if len(traj) < 2:
-            return
-        xs = [p[0] for p in traj]
-        ys = [p[1] for p in traj]
-        ax.plot(xs, ys, color=color, linewidth=2.0, label=label)
-        ax.scatter([xs[0]], [ys[0]], marker="o", s=24, color=color)
-        ax.scatter([xs[-1]], [ys[-1]], marker="x", s=36, color=color)
+    # 动态障碍物趋势 + 轨迹：红色
+    _draw_dynamic_trend(ax, ddpg.dyn_trajs)
 
-    draw(ddpg.traj, "#1f77b4", f"DDPG (steps={ddpg.steps}, {ddpg.reason})")
-    draw(att.traj, "#ff7f0e", f"LSTM-DDPG-Att (steps={att.steps}, {att.reason})")
+    # 两条机器人轨迹（同为蓝色，线型区分）
+    _draw_robot_traj(ax, ddpg.robot_traj, f"DDPG steps={ddpg.steps}, {ddpg.reason}", linestyle='-')
+    _draw_robot_traj(ax, att.robot_traj, f"ATT steps={att.steps}, {att.reason}", linestyle='--')
 
-    ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
-    ax.set_title("Training Scene Trajectory Compare: DDPG vs LSTM-DDPG-Attention")
+    ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
+    ax.set_title('Dynamic Obstacle Trend & Trajectory + Robot Trajectory Compare')
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
@@ -346,7 +414,6 @@ def main() -> None:
     att_meta = att_ckpt.get("state_meta", {}) if isinstance(att_ckpt, dict) else {}
     att_cfg = state_cfg_from_meta(att_meta if isinstance(att_meta, dict) else {})
 
-    # 若 meta 不可信，则回退到 state_dim 推断
     env_tmp = make_env(att_cfg, args.dynamic_speed_min, args.dynamic_speed_max, patterns, args.dynamic_stop_prob)
     if int(env_tmp.state_dim) != int(ddpg_state_dim):
         att_cfg = infer_state_cfg_from_state_dim(ddpg_state_dim)
