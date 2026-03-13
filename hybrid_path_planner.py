@@ -54,6 +54,9 @@ class HybridConfig:
     replan_iteration_scale: float = 0.5
     max_replans_per_episode: int = 2
     global_corridor_width: float = 10.0
+    global_min_progress_step: float = 0.20
+    global_smooth_iterations: int = 4
+    global_smooth_alpha: float = 0.5
 
     # 航迹密化
     densify_spacing: float = 0.30
@@ -188,6 +191,83 @@ class HybridTrajectoryPlanner:
             interpolation="pchip",
         )
 
+    def _static_obstacle_circles(self) -> list[tuple[float, float, float]]:
+        circles: list[tuple[float, float, float]] = []
+        for obs in self.env.obstacles:
+            if not obs.is_dynamic:
+                circles.append((float(obs.x), float(obs.y), float(obs.radius)))
+        return circles
+
+    def _remove_backtracking(
+        self,
+        path_xy: np.ndarray,
+        start_xy: np.ndarray,
+        goal_xy: np.ndarray,
+    ) -> np.ndarray:
+        """移除明显回退段，抑制全局航迹中的大幅折返。"""
+        if len(path_xy) <= 2:
+            return path_xy
+
+        axis = goal_xy - start_xy
+        axis_norm = float(np.linalg.norm(axis))
+        if axis_norm < 1e-9:
+            return path_xy
+        axis = axis / axis_norm
+
+        kept = [path_xy[0]]
+        last_proj = float(np.dot(path_xy[0] - start_xy, axis))
+        min_step = float(self.cfg.global_min_progress_step)
+
+        for p in path_xy[1:]:
+            proj = float(np.dot(p - start_xy, axis))
+            if proj + 1e-6 < last_proj:
+                continue
+            if proj - last_proj < min_step and len(kept) > 1:
+                continue
+            kept.append(p)
+            last_proj = proj
+
+        if np.linalg.norm(kept[-1] - goal_xy) > 1e-6:
+            kept.append(goal_xy)
+        return np.asarray(kept, dtype=np.float32)
+
+    def _smooth_path(
+        self,
+        path_xy: np.ndarray,
+        static_obstacles: list[tuple[float, float, float]],
+    ) -> np.ndarray:
+        """轻量平滑：拉普拉斯迭代，并对障碍碰撞点回退。"""
+        if len(path_xy) <= 2:
+            return path_xy
+
+        out = path_xy.astype(np.float32).copy()
+        alpha = float(np.clip(self.cfg.global_smooth_alpha, 0.0, 1.0))
+        safe_margin = float(self.cfg.robot_radius + self.cfg.safety_margin)
+
+        for _ in range(max(0, int(self.cfg.global_smooth_iterations))):
+            prev = out.copy()
+            for i in range(1, len(out) - 1):
+                lap = 0.5 * (prev[i - 1] + prev[i + 1])
+                candidate = (1.0 - alpha) * prev[i] + alpha * lap
+
+                safe = True
+                for ox, oy, rr in static_obstacles:
+                    if math.hypot(float(candidate[0]) - ox, float(candidate[1]) - oy) <= rr + safe_margin:
+                        safe = False
+                        break
+                out[i] = candidate if safe else prev[i]
+        return out
+
+    def _postprocess_global_path(
+        self,
+        path_xy: np.ndarray,
+        start_xy: np.ndarray,
+        goal_xy: np.ndarray,
+    ) -> np.ndarray:
+        filtered = self._remove_backtracking(path_xy, start_xy, goal_xy)
+        smoothed = self._smooth_path(filtered, self._static_obstacle_circles())
+        return smoothed
+
     @staticmethod
     def _densify_path(path_xy: np.ndarray, max_spacing: float) -> np.ndarray:
         if len(path_xy) <= 1:
@@ -231,7 +311,8 @@ class HybridTrajectoryPlanner:
             random_state=int(self.rng.integers(1, 10**9)),
         )
         coarse = g_env.sample_path(best_pos)[:, :2]
-        self.global_path = self._densify_path(coarse, self.cfg.densify_spacing)
+        clean = self._postprocess_global_path(coarse, start_xy, goal_xy)
+        self.global_path = self._densify_path(clean, self.cfg.densify_spacing)
 
         dists = np.linalg.norm(self.global_path - start_xy[None, :], axis=1)
         self.current_goal_idx = int(np.argmin(dists))
