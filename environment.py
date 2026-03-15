@@ -176,6 +176,7 @@ class Obstacle:
             y,
             radius,
             is_dynamic=False,
+            is_known=False,
             vx=0.0,
             vy=0.0,
             pattern="bounce",
@@ -188,6 +189,7 @@ class Obstacle:
         self.y = y
         self.radius = radius
         self.is_dynamic = is_dynamic
+        self.is_known = bool(is_known)
         self.vx = vx
         self.vy = vy
         self.pattern = pattern
@@ -239,6 +241,7 @@ class Obstacle:
             'y': self.y,
             'radius': self.radius,
             'is_dynamic': self.is_dynamic,
+            'is_known': self.is_known,
             'vx': self.vx,
             'vy': self.vy
         }
@@ -371,15 +374,19 @@ class NavigationEnv:
 
     def _create_obstacles(self):
         self.obstacles = []
+        known_static = int(np.clip(getattr(EnvConfig, 'KNOWN_STATIC_OBSTACLES', EnvConfig.NUM_STATIC_OBSTACLES), 0,
+                                   EnvConfig.NUM_STATIC_OBSTACLES))
 
-        for _ in range(EnvConfig.NUM_STATIC_OBSTACLES):
+        for i in range(EnvConfig.NUM_STATIC_OBSTACLES):
             while True:
                 x = np.random.uniform(1.5, EnvConfig.MAP_WIDTH - 1.5)
                 y = np.random.uniform(1.5, EnvConfig.MAP_HEIGHT - 1.5)
                 radius = np.random.uniform(EnvConfig.OBSTACLE_RADIUS_MIN, EnvConfig.OBSTACLE_RADIUS_MAX)
 
                 if self._is_valid_obstacle_position(x, y, radius):
-                    self.obstacles.append(Obstacle(x, y, radius, is_dynamic=False))
+                    self.obstacles.append(
+                        Obstacle(x, y, radius, is_dynamic=False, is_known=(i < known_static))
+                    )
                     break
 
         for _ in range(EnvConfig.NUM_DYNAMIC_OBSTACLES):
@@ -402,6 +409,7 @@ class NavigationEnv:
                         Obstacle(
                             x, y, radius,
                             is_dynamic=True,
+                            is_known=False,
                             vx=vx, vy=vy,
                             pattern=pattern,
                             speed_min=self.dynamic_speed_min,
@@ -488,6 +496,7 @@ class NavigationEnv:
         return state, reward, done, info
 
     def _get_state(self):
+        self._update_obstacle_knowledge()
         obs_dicts = [obs.to_dict() for obs in self.obstacles]
         lidar_ranges = self.lidar.scan(self.robot, obs_dicts, self.walls)
 
@@ -529,6 +538,15 @@ class NavigationEnv:
         ])
 
         return state.astype(np.float32)
+
+    def _update_obstacle_knowledge(self):
+        """动态障碍物：进入LiDAR量程后标记为已知。"""
+        rx, ry = self.robot.x, self.robot.y
+        detect_r = float(EnvConfig.LIDAR_MAX_RANGE)
+        for obs in self.obstacles:
+            if obs.is_dynamic and (not obs.is_known):
+                if math.hypot(obs.x - rx, obs.y - ry) <= detect_r + obs.radius:
+                    obs.is_known = True
 
     def _get_distance_to_goal(self):
         return math.hypot(self.goal_x - self.robot.x, self.goal_y - self.robot.y)
@@ -646,14 +664,24 @@ class NavigationEnv:
 
         # 绘制障碍物
         for i, obs in enumerate(self.obstacles):
-            if not obs.is_dynamic:  # 静态障碍物
-                obs_circle = Circle((obs.x, obs.y), obs.radius,
-                                    color='gray', alpha=0.7,
-                                    label='Static Obstacle' if i == 0 else '')
-            else:  # 动态障碍物
-                obs_circle = Circle((obs.x, obs.y), obs.radius,
-                                    color='red', alpha=0.5,
-                                    label='Dynamic Obstacle' if i == 1 else '')
+            if not obs.is_dynamic:  # 静态障碍物（蓝）
+                if obs.is_known:
+                    obs_circle = Circle((obs.x, obs.y), obs.radius,
+                                        facecolor='blue', edgecolor='blue', alpha=0.45,
+                                        label='Known Static' if i == 0 else '')
+                else:
+                    obs_circle = Circle((obs.x, obs.y), obs.radius,
+                                        facecolor='none', edgecolor='blue', linewidth=1.8, alpha=0.9,
+                                        label='Unknown Static' if i == 0 else '')
+            else:  # 动态障碍物（红）
+                if obs.is_known:
+                    obs_circle = Circle((obs.x, obs.y), obs.radius,
+                                        facecolor='red', edgecolor='red', alpha=0.45,
+                                        label='Known Dynamic' if i == 1 else '')
+                else:
+                    obs_circle = Circle((obs.x, obs.y), obs.radius,
+                                        facecolor='none', edgecolor='red', linewidth=1.8, alpha=0.9,
+                                        label='Unknown Dynamic' if i == 1 else '')
             self.ax.add_patch(obs_circle)
 
             # 绘制动态障碍物的速度向量

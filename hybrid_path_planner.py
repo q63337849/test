@@ -166,14 +166,14 @@ class HybridTrajectoryPlanner:
             return float(np.linalg.norm(point - proj))
 
         for obs in self.env.obstacles:
-            if not obs.is_dynamic:
+            if (not obs.is_dynamic) and getattr(obs, "is_known", True):
                 d = _dist_to_segment(obs.x, obs.y)
                 if d <= self.cfg.global_corridor_width:
                     static_boxes.append(self._circle_to_aabb(obs.x, obs.y, obs.radius))
 
         if not static_boxes:
             for obs in self.env.obstacles:
-                if not obs.is_dynamic:
+                if (not obs.is_dynamic) and getattr(obs, "is_known", True):
                     static_boxes.append(self._circle_to_aabb(obs.x, obs.y, obs.radius))
 
         obstacles = np.asarray(static_boxes, dtype=np.float64) if static_boxes else np.zeros((0, 6), dtype=np.float64)
@@ -194,7 +194,7 @@ class HybridTrajectoryPlanner:
     def _static_obstacle_circles(self) -> list[tuple[float, float, float]]:
         circles: list[tuple[float, float, float]] = []
         for obs in self.env.obstacles:
-            if not obs.is_dynamic:
+            if (not obs.is_dynamic) and getattr(obs, "is_known", True):
                 circles.append((float(obs.x), float(obs.y), float(obs.radius)))
         return circles
 
@@ -340,11 +340,10 @@ class HybridTrajectoryPlanner:
     # ------------------------ 感知/安全 ------------------------
 
     def get_planner_obstacles(self) -> list[tuple[float, float, float]]:
-        """返回“先验静态 + 已感知动态（LiDAR量程内）”障碍物。"""
+        """返回“已知静态 + 已知动态”障碍物。"""
         obs = []
-        rx, ry = self.env.robot.x, self.env.robot.y
         for o in self.env.obstacles:
-            if (not o.is_dynamic) or (math.hypot(o.x - rx, o.y - ry) <= EnvConfig.LIDAR_MAX_RANGE + o.radius):
+            if getattr(o, "is_known", False):
                 obs.append((float(o.x), float(o.y), float(o.radius)))
         return obs
 

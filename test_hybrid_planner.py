@@ -37,10 +37,16 @@ def _save_episode_plot(env: NavigationEnv, planner: HybridTrajectoryPlanner, res
     os.makedirs(plot_dir, exist_ok=True)
     fig, ax = plt.subplots(figsize=(8, 8))
 
-    # 障碍物（终止时刻位置）
+    # 障碍物（终止时刻位置）：已知=实心，未知=空心
     for obs in env.obstacles:
-        color = "tab:red" if obs.is_dynamic else "tab:orange"
-        ax.add_patch(Circle((obs.x, obs.y), obs.radius, color=color, alpha=0.25))
+        is_known = bool(getattr(obs, "is_known", False))
+        if obs.is_dynamic:
+            edge = "red"
+            face = "red" if is_known else "none"
+        else:
+            edge = "blue"
+            face = "blue" if is_known else "none"
+        ax.add_patch(Circle((obs.x, obs.y), obs.radius, edgecolor=edge, facecolor=face, linewidth=1.8, alpha=0.45))
 
     # 动态障碍物最近40步轨迹 + 当前运动方向
     dyn_traces = result.get("dynamic_obstacle_traces", {}) or {}
@@ -80,6 +86,12 @@ def _save_episode_plot(env: NavigationEnv, planner: HybridTrajectoryPlanner, res
     ax.plot(tr[:, 0], tr[:, 1], "-", color="tab:blue", linewidth=1.5, label="executed_trajectory")
     ax.scatter(tr[0, 0], tr[0, 1], c="green", s=40, label="start")
     ax.scatter(env.goal_x, env.goal_y, c="red", s=50, marker="*", label="goal")
+
+    # 障碍物图例
+    ax.scatter([], [], s=80, c="blue", label="known_static")
+    ax.scatter([], [], s=80, facecolors="none", edgecolors="blue", label="unknown_static")
+    ax.scatter([], [], s=80, c="red", label="known_dynamic")
+    ax.scatter([], [], s=80, facecolors="none", edgecolors="red", label="unknown_dynamic")
 
     ax.set_xlim(0, EnvConfig.MAP_WIDTH)
     ax.set_ylim(0, EnvConfig.MAP_HEIGHT)
@@ -123,7 +135,15 @@ def _apply_env_overrides(args: argparse.Namespace) -> None:
     """将测试参数写入 EnvConfig，便于构造 50m×50m 等大规模测试环境。"""
     EnvConfig.MAP_WIDTH = float(args.map_width)
     EnvConfig.MAP_HEIGHT = float(args.map_height)
-    EnvConfig.NUM_STATIC_OBSTACLES = int(args.num_static_obstacles)
+    if args.known_static_obstacles is not None or args.unknown_static_obstacles is not None:
+        known = int(args.known_static_obstacles or 0)
+        unknown = int(args.unknown_static_obstacles or 0)
+        EnvConfig.NUM_STATIC_OBSTACLES = max(0, known + unknown)
+        EnvConfig.KNOWN_STATIC_OBSTACLES = int(np.clip(known, 0, EnvConfig.NUM_STATIC_OBSTACLES))
+    else:
+        EnvConfig.NUM_STATIC_OBSTACLES = int(args.num_static_obstacles)
+        EnvConfig.KNOWN_STATIC_OBSTACLES = int(np.clip(args.num_static_obstacles, 0, EnvConfig.NUM_STATIC_OBSTACLES))
+
     EnvConfig.NUM_DYNAMIC_OBSTACLES = int(args.num_dynamic_obstacles)
     EnvConfig.MAX_STEPS = int(args.max_steps)
     EnvConfig.LIDAR_MAX_RANGE = float(args.lidar_max_range)
@@ -176,7 +196,12 @@ def run(args: argparse.Namespace) -> None:
     print("=" * 72)
     print(f"map: {EnvConfig.MAP_WIDTH:.1f}m x {EnvConfig.MAP_HEIGHT:.1f}m")
     print(f"static_obstacles: {EnvConfig.NUM_STATIC_OBSTACLES}")
+    print(
+        f"known_static={EnvConfig.KNOWN_STATIC_OBSTACLES}, "
+        f"unknown_static={EnvConfig.NUM_STATIC_OBSTACLES - EnvConfig.KNOWN_STATIC_OBSTACLES}"
+    )
     print(f"dynamic_obstacles: {EnvConfig.NUM_DYNAMIC_OBSTACLES}")
+    print("dynamic_obstacles_init: all unknown")
     print(f"dynamic_speed: [{args.dynamic_speed_min:.2f}, {args.dynamic_speed_max:.2f}] m/s")
     print(f"lidar: rays={EnvConfig.LIDAR_RAYS}, range={EnvConfig.LIDAR_MAX_RANGE:.1f}m, fov={EnvConfig.LIDAR_FOV}°")
     print(f"goal_radius: {EnvConfig.GOAL_RADIUS:.2f}m")
@@ -241,6 +266,8 @@ if __name__ == "__main__":
     parser.add_argument("--map_width", type=float, default=50.0)
     parser.add_argument("--map_height", type=float, default=50.0)
     parser.add_argument("--num_static_obstacles", type=int, default=40)
+    parser.add_argument("--known_static_obstacles", type=int, default=None)
+    parser.add_argument("--unknown_static_obstacles", type=int, default=None)
     parser.add_argument("--num_dynamic_obstacles", type=int, default=20)
     parser.add_argument("--lidar_max_range", type=float, default=5.0)
     parser.add_argument("--goal_radius", type=float, default=0.30)
