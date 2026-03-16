@@ -42,6 +42,7 @@ class EnvConfig:
     
     # 障碍物参数（简化版，先验证算法有效性）
     NUM_STATIC_OBSTACLES = 8       # 5 → 3
+    KNOWN_STATIC_OBSTACLES = 8
     NUM_DYNAMIC_OBSTACLES = 6      # 4 → 2（总共5个，原来9个）
     OBSTACLE_RADIUS_MIN = 0.1
     OBSTACLE_RADIUS_MAX = 0.3
